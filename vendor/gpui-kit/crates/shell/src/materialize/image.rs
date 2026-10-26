@@ -4,7 +4,7 @@ use std::{collections::HashMap, rc::Rc, sync::Arc, time::Duration};
 
 use gpui::{
     App, AppContext as _, BorrowAppContext as _, Entity, Global, ImageCacheItem, ImageSource,
-    Resource, Task, Window, WindowId,
+    Resource, Task, WindowId,
 };
 
 const GRACE: Duration = Duration::from_secs(5);
@@ -19,8 +19,7 @@ struct Cache {
 }
 
 impl Cache {
-    fn new(window: &Window, cx: &mut App) -> Entity<Self> {
-        let window = window.window_handle();
+    fn new(cx: &mut App) -> Entity<Self> {
         cx.new(|cx| {
             cx.on_release(|this: &mut Self, cx| {
                 for (_, (image, _)) in this.images.drain() {
@@ -35,7 +34,6 @@ impl Cache {
                     cx.background_executor().timer(GRACE).await;
                     if this
                         .update(cx, |this, cx| {
-                            let before = this.images.len();
                             this.images.retain(|_, (image, unused)| {
                                 if Rc::strong_count(image) > 1 {
                                     *unused = false;
@@ -50,12 +48,6 @@ impl Cache {
                                 }
                                 false
                             });
-                            if this.images.len() != before {
-                                // An idle renderer releases retired texture backing after a present.
-                                cx.defer(move |cx| {
-                                    let _ = window.update(cx, |_, window, _| window.refresh());
-                                });
-                            }
                         })
                         .is_err()
                     {
@@ -87,7 +79,7 @@ pub(super) fn source(path: &str) -> ImageSource {
             caches
                 .0
                 .entry(window.window_handle().window_id())
-                .or_insert_with(|| Cache::new(window, cx))
+                .or_insert_with(|| Cache::new(cx))
                 .clone()
         });
         cache.update(cx, |cache, cx| {
@@ -106,7 +98,7 @@ pub(super) fn source(path: &str) -> ImageSource {
 }
 
 #[cfg(feature = "render-test-support")]
-pub(crate) fn loaded(window: &Window, cx: &App) -> Vec<Arc<gpui::RenderImage>> {
+pub(crate) fn loaded(window: &gpui::Window, cx: &App) -> Vec<Arc<gpui::RenderImage>> {
     cx.try_global::<Caches>()
         .and_then(|caches| caches.0.get(&window.window_handle().window_id()))
         .map(|cache| {
