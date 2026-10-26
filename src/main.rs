@@ -36,11 +36,6 @@ mod vt;
 mod win32_keys;
 mod window;
 
-// Run the vendored image-lifetime regression with the app's locked dependencies.
-#[cfg(test)]
-#[path = "../vendor/gpui-kit/crates/shell/src/materialize/image.rs"]
-mod image_lifetime;
-
 use gpui::*;
 
 const HELP: &str = "\

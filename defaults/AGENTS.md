@@ -730,7 +730,6 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
 - Images and SVGs are referenced from `~/.config/herdr-app`:
   `image("mods/<name>/logo.svg")` (full color), `svg("mods/<name>/icon.svg")`
   (tinted with the text color).
-  Replaced or removed `image()` and avatar sources release their image data and textures.
 - The defaults are mods too, read them as examples: `spaces`, `agents`,
   `tabs` (the tab bar), `menu`, `prompt`, `confirm`, `help`, `toast`,
   Terminals' `picker`, `peek`, and `pane` (an

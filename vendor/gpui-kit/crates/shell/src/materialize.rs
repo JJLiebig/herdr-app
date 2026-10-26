@@ -136,7 +136,7 @@ use gpui_base::{
 };
 
 mod components;
-mod image;
+pub(crate) mod image;
 mod text_view;
 
 use crate::{
