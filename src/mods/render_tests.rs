@@ -463,10 +463,11 @@ fn animated_images_advance_with_explicit_and_implicit_ids(cx: &mut TestAppContex
         let source = format!("import {{ View, image }} from 'gpui-kit'; export default class Demo extends View {{ render() {{ return image('{url}'){}.size(20); }} }}", if explicit { ".id('clip')" } else { "" });
         std::fs::write(staged.0.join("main.js"), source).unwrap();
         let context = cx.add_empty_window();
-        let view = context.update(|window, cx| {
+        let (session, view) = context.update(|window, cx| {
             window.activate_window();
-            let root = runtime.try_load(&staged.0, window, cx).unwrap();
-            root.read(cx).content().clone()
+            let session = DescriptionSession::load(runtime, &staged.0, Policy::new(), window, cx).unwrap();
+            let view = session.view().clone();
+            (session, view)
         });
         let draw = |context: &mut gpui::VisualTestContext| {
             let view = view.clone();
@@ -476,8 +477,7 @@ fn animated_images_advance_with_explicit_and_implicit_ids(cx: &mut TestAppContex
         context.run_until_parked();
         draw(context);
         assert!(context.update(|window, _| window.is_window_active()));
-        let resource = gpui::Resource::Uri(url.into());
-        let data: Arc<gpui::RenderImage> = context.update(|_, cx| cx.fetch_asset::<gpui::ImgResourceLoader>(&resource).unwrap().unwrap());
+        let data: Arc<gpui::RenderImage> = context.update(|window, cx| session.loaded_images(window, cx).pop().unwrap());
         assert_eq!(data.frame_count(), 2);
         assert!(!context.update(|window, _| window.has_image_atlas_entry(&data)));
         // GPUI's image clock is wall time, not the test executor's clock.
