@@ -621,10 +621,13 @@ fn mod_images_share_across_keyed_rows_and_retire_after_removal(cx: &mut TestAppC
                 .cached(gpui::StyleRefinement::default().size_full()))
         }
     }
+    fn frame(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+    }
     fn draw(cx: &mut VisualTestContext) {
         for _ in 0..4 {
-            cx.update(|window, cx| window.draw(cx).clear(cx));
-            cx.run_until_parked();
+            frame(cx);
         }
     }
     fn tick(cx: &mut VisualTestContext) {
@@ -679,7 +682,7 @@ fn mod_images_share_across_keyed_rows_and_retire_after_removal(cx: &mut TestAppC
 
     state.borrow_mut()["path"] = Value::Null;
     view.update(context, |view, cx| view.refresh(cx));
-    draw(context);
+    frame(context);
     tick(context);
     state.borrow_mut()["path"] = json!("https://images.example/first.svg");
     state.borrow_mut()["mount"] = json!(1);
@@ -706,7 +709,7 @@ fn mod_images_share_across_keyed_rows_and_retire_after_removal(cx: &mut TestAppC
 
     state.borrow_mut()["path"] = Value::Null;
     view.update(context, |view, cx| view.refresh(cx));
-    draw(context);
+    frame(context);
     // No further frame is needed for the timer to release the last removed image.
     for _ in 0..2 { tick(context); }
     context.update(|window, _| assert!(!window.has_image_atlas_entry(&second)));
