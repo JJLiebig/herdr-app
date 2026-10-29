@@ -20,11 +20,11 @@ class BusyError(RuntimeError):
 
 
 @contextmanager
-def terminal_lock():
+def terminal_lock(hook=False):
     identity = os.environ["HC_TERMINAL_SOCKET"] + "\0" + os.environ["HC_TERMINAL_ID"]
     directory = Path.home() / ".cache" / "herdr-agent-recovery"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path = directory / (hashlib.sha256(identity.encode()).hexdigest() + ".lock")
+    path = directory / (hashlib.sha256(identity.encode()).hexdigest() + (".claude.lock" if hook else ".lock"))
     # Keep the file: unlinking it can split Unix contenders across different inodes.
     with path.open("a+b") as handle:
         if handle.tell() == 0:
@@ -34,10 +34,10 @@ def terminal_lock():
         try:
             if os.name == "nt":
                 import msvcrt
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK if hook else msvcrt.LK_NBLCK, 1)
             else:
                 import fcntl
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | (0 if hook else fcntl.LOCK_NB))
         except OSError:
             raise BusyError("a managed agent already owns this terminal") from None
         yield
@@ -128,12 +128,14 @@ def document_name(terminal):
     return "herdr-main-" + terminal
 
 
-def claim(core, terminal, agent, cwd, session_id=None, current=None, explicit_resume=False):
+def claim(core, terminal, agent, cwd, session_id=None, current=None, explicit_resume=False, owner_pid=None):
     if current is None:
         current = core.call("doc.get", {"name": document_name(terminal)})
     value = dict(agent=agent, cwd=cwd, session_id=session_id)
     if explicit_resume:
         value["explicit_resume"] = True
+    if owner_pid is not None:
+        value["owner_pid"] = owner_pid
     # A competing managed launch wins or loses explicitly; never overwrite its claim.
     core.call("doc.set", dict(name=document_name(terminal), version=current["version"], value=value))
     return value
@@ -169,11 +171,66 @@ def shell():
     return child(command, str(Path.home()), os.environ)
 
 
-def run(args):
-    config_path = Path(args.config).resolve(strict=True)
+def load_config(path):
+    config_path = Path(path).resolve(strict=True)
     config = json.loads(config_path.read_text(encoding="utf-8"))
     if not isinstance(config["argv"], list) or not config["argv"] or not config["argv"][0] or not all(isinstance(s, str) for s in config["argv"]):
         raise ValueError("config argv must be a nonempty string array")
+    return config_path, config
+
+
+def recovery_command(config_path):
+    return dict(argv=[sys.executable, str(Path(__file__).resolve()), "recover", "--config", str(config_path)],
+                cwd=str(Path(__file__).resolve().parent))
+
+
+def claude_hook(config_path, event):
+    if not all(os.environ.get(key) for key in ("HC_TERMINAL_ID", "HC_TERMINAL_SOCKET", "HC_SCOPE")):
+        return
+    # Claude sets this on hook subprocesses; background forks also have a virtual REPL.
+    if os.environ.get("CLAUDE_JOB_DIR") or os.environ.get("CLAUDE_CODE_SESSION_ATTENDED") != "1":
+        return
+    if not isinstance(event, dict):
+        raise ValueError("hook input must be an object")
+    if event.get("agent_id"):
+        return
+    name = event.get("hook_event_name")
+    if name != "SessionStart" and not (name == "SessionEnd" and event.get("reason") in ("prompt_input_exit", "logout")):
+        return
+    session_id = event["session_id"]
+    if not isinstance(session_id, str):
+        raise ValueError("Claude supplied no session ID")
+    uuid.UUID(session_id)
+    owner_pid = int(os.environ["CLAUDE_PID"])
+    if owner_pid <= 0:
+        raise ValueError("Claude supplied no owning process")
+    terminal = os.environ["HC_TERMINAL_ID"]
+    scope = dict(terminal=terminal, expected_scope=os.environ["HC_SCOPE"])
+    # The launcher lock spans its child; lifecycle hooks have a short, separate critical section.
+    with terminal_lock(hook=True), Core() as core:
+        recovery_schema(core)
+        record = core.call("terminal.get", dict(terminal=terminal))
+        if record["state"] != "live":
+            return
+        current = core.call("doc.get", dict(name=document_name(terminal)))
+        if name == "SessionStart":
+            config_path, config = load_config(config_path)
+            if config["agent"] != "claude":
+                raise ValueError("Claude hooks require a Claude config")
+            cwd = str(Path(event["cwd"]).resolve(strict=True))
+            if not Path(cwd).is_dir():
+                raise ValueError("session working directory is unavailable")
+            # Core validates HC_SCOPE here; its public terminal record deliberately omits it.
+            core.call("terminal.keep", dict(scope, keep=True, recovery=dict(argv=vendor_command(config, session_id), cwd=cwd)))
+            claim(core, terminal, "claude", cwd, session_id, current=current, owner_pid=owner_pid)
+        else:
+            pin = current["value"]
+            if pin and pin.get("agent") == "claude" and pin.get("session_id") == session_id and pin.get("owner_pid") == owner_pid:
+                core.call("terminal.keep", dict(scope, keep=False))
+
+
+def run(args):
+    config_path, config = load_config(args.config)
     terminal = os.environ["HC_TERMINAL_ID"]
     session_id = args.session_id
     with Core() as core:
@@ -215,9 +272,7 @@ def run(args):
             core.call("terminal.keep", dict(scope, keep=False))
         claim(core, terminal, config["agent"], cwd, expected,
               current=current, explicit_resume=explicit_resume)
-        recovery = dict(argv=[sys.executable, str(Path(__file__).resolve()), "recover", "--config", str(config_path)],
-                        cwd=str(Path(__file__).resolve().parent))
-        core.call("terminal.keep", dict(scope, keep=True, recovery=recovery))
+        core.call("terminal.keep", dict(scope, keep=True, recovery=recovery_command(config_path)))
     return child(command, cwd, os.environ)
 
 
@@ -235,13 +290,30 @@ def disarm():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("new", "resume", "recover"))
+    parser.add_argument("action", choices=("new", "resume", "recover", "claude-hook"))
     parser.add_argument("--config", required=True)
     parser.add_argument("--cwd")
     parser.add_argument("--session-id")
     args = parser.parse_args()
     if args.session_id and args.action != "resume":
         parser.error("--session-id selects a conversation only with resume")
+    if args.action == "claude-hook":
+        event = None
+        try:
+            event = json.load(sys.stdin)
+            claude_hook(args.config, event)
+        except RpcError as error:
+            if error.kind != "unavailable":
+                print(f"Herdr recovery: {error}", file=sys.stderr)
+                return 1
+        except (FileNotFoundError, ConnectionError) as error:
+            if not isinstance(event, dict) or event.get("hook_event_name") != "SessionEnd":
+                print(f"Herdr recovery: {error}", file=sys.stderr)
+                return 1
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError) as error:
+            print(f"Herdr recovery: {error}", file=sys.stderr)
+            return 1
+        return 0
     fallback = False
     result = None
     try:

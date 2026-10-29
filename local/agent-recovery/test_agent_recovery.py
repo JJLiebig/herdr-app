@@ -423,5 +423,76 @@ vm.runInNewContext(source + '; globalThis.Menu = NewMenu;', context);
         self.assertNotIn("--dangerously-skip-permissions", command)
 
 
+class ClaudeHookTests(unittest.TestCase):
+    def test_native_identity_tracks_main_changes_and_only_its_owner_can_finish(self):
+        with tempfile.TemporaryDirectory(prefix="Claude hook ") as folder:
+            config = Path(folder) / "claude.json"
+            config.write_text(json.dumps(dict(agent="claude", argv=["claude"])))
+            first, next_id = str(uuid.uuid4()), str(uuid.uuid4())
+            core = LaunchCore()
+            env = dict(HC_TERMINAL_ID="t1", HC_TERMINAL_SOCKET="hook-" + str(uuid.uuid4()), HC_SCOPE="scope",
+                       CLAUDE_CODE_SESSION_ATTENDED="1", CLAUDE_PID="101")
+            start = dict(hook_event_name="SessionStart", session_id=first, cwd=folder, source="startup", extra="ignored")
+            with patch.object(helper, "Core", return_value=core), patch.dict(helper.os.environ, env), \
+                 patch.object(helper, "child", side_effect=AssertionError("hooks must not launch a program")):
+                # A recovered/menu launcher can hold its lifetime lock while Claude's hooks run.
+                with helper.terminal_lock():
+                    helper.claude_hook(config, start)
+                self.assertEqual(core.value, dict(agent="claude", cwd=str(Path(folder).resolve()), session_id=first, owner_pid=101))
+                self.assertTrue(core.kept)
+                for source in ("clear", "resume", "fork"):
+                    helper.claude_hook(config, dict(start, session_id=next_id, source=source))
+                    self.assertEqual(core.value["session_id"], next_id)
+                end = dict(hook_event_name="SessionEnd", session_id=next_id, reason="prompt_input_exit")
+                for reason in ("clear", "resume", "other"):
+                    helper.claude_hook(config, dict(end, reason=reason))
+                    self.assertTrue(core.kept)
+                helper.claude_hook(config, dict(end, session_id=first))
+                with patch.dict(helper.os.environ, CLAUDE_PID="102"):
+                    helper.claude_hook(config, end)
+                self.assertTrue(core.kept)
+                helper.claude_hook(config, end)
+                self.assertFalse(core.kept)
+
+    def test_background_headless_subagents_and_non_herdr_calls_do_not_enroll(self):
+        event = dict(hook_event_name="SessionStart", session_id=str(uuid.uuid4()), cwd="unused")
+        base = dict(HC_TERMINAL_ID="t1", HC_TERMINAL_SOCKET="fixture", HC_SCOPE="scope", CLAUDE_PID="101",
+                    CLAUDE_CODE_SESSION_ATTENDED="1")
+        with patch.object(helper, "Core", side_effect=AssertionError("unattended calls must not touch core")):
+            for changes, payload in [
+                (dict(HC_SCOPE=""), event),
+                (dict(CLAUDE_CODE_SESSION_ATTENDED="0"), event),
+                (dict(CLAUDE_CODE_SESSION_ATTENDED=""), event),
+                (dict(CLAUDE_JOB_DIR="background-job"), event),
+                ({}, dict(event, agent_id="child")),
+            ]:
+                with patch.dict(helper.os.environ, dict(base, **changes)):
+                    helper.claude_hook("unused", payload)
+
+    def test_shutdown_and_missing_core_preserve_recipe_without_opening_a_shell(self):
+        class StoppingCore(LaunchCore):
+            def call(self, method, params):
+                if method == "terminal.keep":
+                    raise helper.RpcError(dict(message="terminal is stopping", data=dict(kind="unavailable")))
+                return super().call(method, params)
+        core = StoppingCore()
+        core.kept = True
+        sid = str(uuid.uuid4())
+        core.value = dict(agent="claude", session_id=sid, owner_pid=101)
+        original = copy.deepcopy(core.value)
+        event = json.dumps(dict(hook_event_name="SessionEnd", session_id=sid, reason="prompt_input_exit"))
+        env = dict(HC_TERMINAL_ID="t1", HC_TERMINAL_SOCKET="hook-" + str(uuid.uuid4()), HC_SCOPE="scope",
+                   CLAUDE_CODE_SESSION_ATTENDED="1", CLAUDE_PID="101")
+        with patch.dict(helper.os.environ, env), \
+             patch.object(sys, "argv", ["helper", "claude-hook", "--config", "unused"]), \
+             patch.object(helper, "shell", side_effect=AssertionError("a hook must never open a shell")):
+            with patch.object(helper, "Core", return_value=core), patch.object(sys, "stdin", io.StringIO(event)):
+                self.assertEqual(helper.main(), 0)
+            self.assertEqual(core.value, original)
+            self.assertTrue(core.kept)
+            with patch.object(helper, "Core", side_effect=FileNotFoundError("stopped core")), patch.object(sys, "stdin", io.StringIO(event)):
+                self.assertEqual(helper.main(), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
