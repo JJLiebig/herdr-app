@@ -393,6 +393,9 @@ The default window:
 
 Sidebar on the right: swap the two children of `root`. No sidebar: set
 `"hidden": true` on `sidebar` (the user can toggle it: `ctrl-shift-b`).
+Narrower than 160px, the sidebar mods draw a compact rail; folding resizes
+`sidebar` to 44 (76 on macOS, room for the traffic lights). On macOS,
+the tabs also leave room for the window buttons when the sidebar is narrower.
 
 ### Layouts other people made
 
@@ -467,7 +470,9 @@ the build doesn't do.
   and letters type characters on many Mac keyboards (`[`, `@`). Don't pick
   these on your own. If the person asks for one, bind it and tell them what
   it takes from typing.
-- Windows AltGr and dead-key compositions type text in terminals.
+- Windows AltGr and dead-key compositions type text in terminals. macOS
+  dead keys compose accents through native text input; Option keeps its
+  keyboard-layout characters rather than acting as Alt.
 - Terminal keys honor the program's negotiated Kitty mode, including on Windows.
 
 ## Commands
@@ -487,7 +492,10 @@ The main ones:
   `space.move {id, index}`, `space.select {index | id}`, `space.next`, `space.prev`.
   With no `argv`, the target core chooses that machine's default shell (PowerShell 7 when available on Windows).
 - Tabs: `tab.new {name?, space?, folder?, argv?, task?}` (argv: an
-  agent to run, task: its first message), or `tab.new {name?, space?, mod,
+  agent to run, task: its first message). Agents run in your interactive
+  shell (including fish), which stays open after the agent exits. A terminal
+  that exits with a nonzero code within two seconds of launch shows an error
+  toast with its exit code and last output lines. Or `tab.new {name?, space?, mod,
   props?}` for a tab whose only pane is a mod (a file, a board; split a shell
   in beside it like any tab), `tab.close {id?, confirmed?}` (closing the last tab
   closes its space and asks first unless confirmed),
@@ -510,7 +518,8 @@ The main ones:
   `terminal.show {terminal?, pane?}`, `terminal.copy`, `terminal.paste` (an image
   alone, into a terminal on another machine: copied there, its path pasted; a
   local program reads the clipboard itself), `terminal.paste_image` (Ctrl+V: the
-  same for an image; otherwise Ctrl+V goes to the program),
+  same for an image; otherwise Ctrl+V goes to the program). TIFF and BMP clipboard
+  images are converted to PNG before sending,
   `terminal.right_click {to: "program" | "menu", terminal?}` (where right-clicks go
   when the program takes the mouse; kept as its label `herdr.right-click=program`;
   Shift+right-click is always Herdr's menu). Copy, paste, paste-image and implicit
@@ -606,6 +615,12 @@ What's about the user, never a look:
   apps' links alone. Disk-image and translocated launches don't create it.
   Finder launches load the login shell's PATH, with the usual install
   folders as a fallback.
+- `clipboard_write`: `false` blocks terminal programs from writing the local
+  clipboard (default `true`, including remote terminals attached in this window).
+  OSC 52 accepts base64 UTF-8 text up to 1 MiB: `c` writes the system clipboard,
+  `p` writes Linux primary selection. `s` is ignored; cut buffers `0`–`7`
+  are treated as the system clipboard.
+  Clipboard reads (`?`) are never allowed.
 - `telemetry`: `false` stops anonymous usage data and deletes what wasn't
   sent (on when absent; Settings → Privacy shows each report word for
   word, and `telemetry()` in mods). Once a day the app sends counts:

@@ -258,7 +258,7 @@ fn resolve(t: &Table, app: Option<&str>, argv: &[String]) -> Value {
         && t.shells.iter().any(|s| s == base(&argv[0]))
         && argv[1].starts_with('-')
         && argv[1].ends_with('c')
-        && argv[2].contains("\"$@\"")
+        && (argv[2].contains("\"$@\"") || argv[2] == "command $argv[2..]; exec $argv[1] -i")
     {
         return resolve(t, None, &argv[4..]);
     }
@@ -352,6 +352,7 @@ mod tests {
         assert_eq!(key(None, &["uv", "run", "pytest"]), "pytest");
         assert_eq!(key(None, &["mytool"]), "program");
         assert_eq!(key(None, &["/bin/zsh", "-ic", "\"$@\"; exec \"$0\" -i", "/bin/zsh", "vi", "x"]), "vim");
+        assert_eq!(key(None, &["/usr/bin/fish", "-ic", "command $argv[2..]; exec $argv[1] -i", "/usr/bin/fish", "vi", "x"]), "vim");
         let line = powershell_line(&["codex".into(), "fix it".into()]);
         assert_eq!(key(None, &["pwsh.exe", "-NoExit", "-Command", &line]), "codex");
         assert_eq!(key(None, &[r"C:\Windows\powershell.exe"]), "shell");
