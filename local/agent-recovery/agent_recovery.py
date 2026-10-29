@@ -1,17 +1,16 @@
 """Personal, opt-in pinned-main conversation recovery for an existing Herdr terminal."""
 
 import argparse
+import asyncio
 from contextlib import contextmanager
 import hashlib
 import json
 import os
 from pathlib import Path
-import queue
 import signal
 import shutil
 import subprocess
 import sys
-import threading
 import time
 import uuid
 
@@ -51,37 +50,48 @@ class RpcError(RuntimeError):
 
 
 class Core:
-    """Bounded newline RPC connection to the terminal-owning core."""
+    """Attach-only newline RPC; never start a stopped core."""
 
     def __enter__(self):
-        env = dict(os.environ, HC_SOCKET=os.environ["HC_TERMINAL_SOCKET"])
-        self.bridge = subprocess.Popen(
-            ["hc", "connect"], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        self.replies = queue.Queue()
+        self.address = os.environ["HC_TERMINAL_SOCKET"]
+        self.runner = asyncio.Runner()
+        self.reader = self.writer = None
         self.sequence = 0
         self.deadline = time.monotonic() + 5
-
-        def read():
-            for line in self.bridge.stdout:
-                self.replies.put(line)
-            self.replies.put(None)
-
-        threading.Thread(target=read, daemon=True).start()
+        try:
+            self.runner.run(asyncio.wait_for(self.connect(), 5))
+        except BaseException:
+            try:
+                self.runner.run(self.close())
+            finally:
+                self.runner.close()
+            raise
         return self
 
+    async def connect(self):
+        # Match core wire.rs MAX_CONTROL; discovery alone nearly fills 64 KiB.
+        limit = 64 * 1024 * 1024
+        if os.name == "nt":
+            loop = asyncio.get_running_loop()
+            self.reader = asyncio.StreamReader(limit=limit)
+            protocol = asyncio.StreamReaderProtocol(self.reader)
+            transport, _ = await loop.create_pipe_connection(lambda: protocol, self.address)
+            self.writer = asyncio.StreamWriter(transport, protocol, self.reader, loop)
+        else:
+            self.reader, self.writer = await asyncio.open_unix_connection(self.address, limit=limit)
+
     def call(self, method, params):
-        self.sequence += 1
-        self.bridge.stdin.write(json.dumps(dict(jsonrpc="2.0", id=self.sequence,
-                                               method=method, params=params)) + "\n")
-        self.bridge.stdin.flush()
         try:
-            line = self.replies.get(timeout=max(0, self.deadline - time.monotonic()))
-        except queue.Empty:
-            raise RuntimeError("core did not answer") from None
-        if line is None:
+            return self.runner.run(asyncio.wait_for(self.exchange(method, params), max(0, self.deadline - time.monotonic())))
+        except TimeoutError:
+            raise RuntimeError("terminal core did not answer") from None
+
+    async def exchange(self, method, params):
+        self.sequence += 1
+        self.writer.write((json.dumps(dict(jsonrpc="2.0", id=self.sequence, method=method, params=params)) + "\n").encode())
+        await self.writer.drain()
+        line = await self.reader.readline()
+        if not line:
             raise RuntimeError("terminal core is unavailable")
         reply = json.loads(line)
         if reply.get("id") != self.sequence:
@@ -90,14 +100,19 @@ class Core:
             raise RpcError(reply["error"])
         return reply["result"]
 
+    async def close(self):
+        if self.writer is not None:
+            try:
+                self.writer.close()
+                await asyncio.wait_for(self.writer.wait_closed(), 1)
+            except OSError:
+                pass
+
     def __exit__(self, *exception):
-        self.bridge.stdin.close()
         try:
-            self.bridge.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            self.bridge.terminate()
-            self.bridge.wait()
-        self.bridge.stdout.close()
+            self.runner.run(self.close())
+        finally:
+            self.runner.close()
 
 
 def document_name(terminal):

@@ -1,6 +1,7 @@
 """Owning tests for helper policy; vendor and core compatibility need native probes."""
 
 import copy
+import asyncio
 from contextlib import nullcontext
 import json
 import io
@@ -9,6 +10,7 @@ import subprocess
 import shutil
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -75,6 +77,55 @@ class LaunchCore(DocumentCore):
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_direct_rpc_reads_large_replies_times_out_and_closes(self):
+        transports = []
+        class ReplyTransport(asyncio.Transport):
+            def __init__(self, protocol):
+                self.protocol, self.closed = protocol, False
+                transports.append(self)
+            def get_extra_info(self, name, default=None):
+                return default
+            def is_closing(self):
+                return self.closed
+            def write(self, data):
+                request = json.loads(data)
+                if request["method"] != "unresponsive":
+                    self.protocol.data_received((json.dumps(dict(jsonrpc="2.0", id=request["id"], result="x" * 70000)) + "\n").encode())
+            def close(self):
+                if not self.closed:
+                    self.closed = True
+                    self.protocol.connection_lost(None)
+        async def pipe(loop, factory, address):
+            protocol = factory()
+            transport = ReplyTransport(protocol)
+            protocol.connection_made(transport)
+            return transport, protocol
+        async def unix(address, *, limit):
+            reader = asyncio.StreamReader(limit=limit)
+            protocol = asyncio.StreamReaderProtocol(reader)
+            transport = ReplyTransport(protocol)
+            protocol.connection_made(transport)
+            return reader, asyncio.StreamWriter(transport, protocol, reader, asyncio.get_running_loop())
+        connector = patch.object(asyncio.ProactorEventLoop, "create_pipe_connection", new=pipe) if helper.os.name == "nt" else patch.object(asyncio, "open_unix_connection", new=unix)
+        with connector, patch.dict(helper.os.environ, HC_TERMINAL_SOCKET="fixture"), patch.object(helper.subprocess, "Popen", side_effect=AssertionError("RPC must not spawn or start a core")):
+            with helper.Core() as core:
+                self.assertEqual(core.call("large", {}), "x" * 70000)
+                core.deadline = time.monotonic() + .02
+                with self.assertRaisesRegex(RuntimeError, "did not answer"):
+                    core.call("unresponsive", {})
+            self.assertTrue(all(t.closed for t in transports))
+
+    def test_missing_endpoint_closes_runner_without_starting_core(self):
+        async def absent(*args, **kwargs):
+            raise FileNotFoundError("stopped endpoint")
+        connector = patch.object(asyncio.ProactorEventLoop, "create_pipe_connection", new=absent) if helper.os.name == "nt" else patch.object(asyncio, "open_unix_connection", new=absent)
+        with connector, patch.dict(helper.os.environ, HC_TERMINAL_SOCKET="absent"), patch.object(helper.subprocess, "Popen", side_effect=AssertionError("must not restart stopped core")):
+            core = helper.Core()
+            with self.assertRaises(FileNotFoundError):
+                core.__enter__()
+            with self.assertRaisesRegex(RuntimeError, "closed"):
+                core.runner.get_loop()
+
 
     def test_menu_opt_in_checks_current_local_windows_space(self):
         module = Path(helper.__file__).parents[2] / "defaults/mods/new-menu/main.js"

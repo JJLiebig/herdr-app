@@ -1,11 +1,12 @@
 # Personal agent recovery
 
 Optional Claude Code / Codex++ recovery in a Herdr terminal, with one persistent
-JS menu seam and no app Rust changes. Runtime needs only this Python script.
+JS menu seam and no app Rust changes. Runtime needs only this Python script. It attaches directly to the terminal core
+endpoint and never starts a stopped core.
 
 ## Setup
 
-Requires Python 3 and `hc` on PATH, the personal core advertising scoped recovery,
+Requires Python 3.11+ and the personal core advertising scoped recovery,
 `Terminal.resume_session` and `Recovery.session_token`, and the Codex++ build
 emitting native OSC 7501 `session=` plus `sessiontoken=`. Stock Codex is not the
 supported producer. Claude uses its native `--session-id` / `--resume` contract.
@@ -22,7 +23,8 @@ configs with direct argument arrays, for example:
 ```
 
 Keep normal vendor model/config/permission arguments; leave conversation selection
-to the managed actions. User settings, plugins, environment and normal native
+to the managed actions; do not store starting prompts or inline secrets here.
+User settings, plugins, environment and normal native
 approvals stay in effect. The helper adds no capture hooks or daemon overrides.
 
 In the personal app build, config presence opts that agent into local Windows
