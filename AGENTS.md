@@ -1,3 +1,38 @@
+# Personal fork rules
+
+This is `JJLiebig/herdr-app`, based on `herdrdev/herdr-app`. Within this
+repository's guidance, these rules override conflicting instructions below.
+The upstream instructions follow unchanged.
+
+- Keep the maintained difference from upstream small. Prefer personal mods,
+  configuration and the helper bundle under `local/` over app Rust changes.
+- Keep fork logic in focused capability files. Upstream files are integration
+  seams: change only the fields, declarations and calls the capability needs.
+  Do not add abstractions or widen visibility just to isolate a few lines.
+- Fix only requested fork behavior, regressions it introduces and required
+  integration seams. Report unrelated upstream defects; review findings do not
+  expand scope. Ask before absorbing a larger upstream subsystem.
+- Preserve upstream commits with a real merge from `upstream/master`. Resolve
+  conflicts narrowly; do not rewrite upstream behavior or include cleanup.
+- Review only fork-authored changes or exact conflict resolutions, never the
+  full upstream integration. Use local review; do not request GitHub AI reviews.
+  Run relevant checks and required native gates; serialize heavy Rust builds.
+- Keep `FORK_LEDGER.md` as a current capability map, not a changelog. Update a
+  capability's owned files, required seams and retirement condition together.
+- User-approved private fork work does not wait for upstream approval. Changes
+  proposed to Can still follow his contribution and shared-API rules. Do not
+  open upstream issues or PRs unless requested.
+- Do not add fork branding, release pipelines, dependency churn or compatibility
+  layers without a concrete need. Agent recovery currently targets Claude and
+  Codex through personal launchers; status remains OSC 7501.
+- `origin` is the public fork. `private-archive` preserves the old private copy.
+  Never mirror-push or publish old private branches wholesale: deleted files
+  remain in history. Publish only audited changes based on public upstream.
+- Screenshots belong in PR attachments, not repository history. Keep machine
+  configuration, credentials and captured conversations out of commits.
+
+---
+
 # Herdr app
 
 The Herdr 2 desktop app (`herdr-app`): a native GPUI client of
