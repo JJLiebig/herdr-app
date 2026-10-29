@@ -997,6 +997,11 @@ impl Vt {
     pub fn encode_key(&mut self, key: GhosttyKey, mods: GhosttyMods, consumed: GhosttyMods, text: Option<&str>, unshifted: Option<char>) -> Vec<u8> {
         unsafe {
             ghostty_key_encoder_setopt_from_terminal(self.keys, self.term);
+            #[cfg(target_os = "macos")]
+            {
+                let option = if gpui_macos::option_as_alt() { GHOSTTY_OPTION_AS_ALT_TRUE } else { GHOSTTY_OPTION_AS_ALT_FALSE };
+                ghostty_key_encoder_setopt(self.keys, GHOSTTY_KEY_ENCODER_OPT_MACOS_OPTION_AS_ALT, &option as *const _ as *const c_void);
+            }
             let e = self.key_event;
             ghostty_key_event_set_action(e, GHOSTTY_KEY_ACTION_PRESS);
             ghostty_key_event_set_key(e, key);

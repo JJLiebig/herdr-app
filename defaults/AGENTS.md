@@ -615,6 +615,12 @@ What's about the user, never a look:
   apps' links alone. Disk-image and translocated launches don't create it.
   Finder launches load the login shell's PATH, with the usual install
   folders as a fallback.
+- `option_as_alt`: macOS only, `"auto"` (default), `"on"`, or `"off"`.
+  `"auto"` sends Option as Alt on US, US International, ABC and ABC variants;
+  other layouts keep native Option text and dead keys. `"on"` enables terminal
+  Alt shortcuts (including Option+E without composition); `"off"` keeps native
+  Option input on every layout. Changes apply immediately, including layout
+  switches. Linux and Windows are unchanged.
 - `clipboard_write`: `false` blocks terminal programs from writing the local
   clipboard (default `true`, including remote terminals attached in this window).
   OSC 52 accepts base64 UTF-8 text up to 1 MiB: `c` writes the system clipboard,

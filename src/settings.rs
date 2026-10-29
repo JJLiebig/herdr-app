@@ -316,6 +316,9 @@ pub struct Person {
     /// Allow terminal programs (including remote ones) to copy text locally.
     #[serde(skip_serializing_if = "is_true")]
     pub clipboard_write: bool,
+    /// macOS Option sends Alt shortcuts, or follows the keyboard layout.
+    #[serde(skip_serializing_if = "OptionAsAlt::is_auto")]
+    pub option_as_alt: OptionAsAlt,
     /// Light or dark: the system's, or one always.
     #[serde(skip_serializing_if = "Appearance::is_system")]
     pub appearance: Appearance,
@@ -340,6 +343,21 @@ impl Appearance {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OptionAsAlt {
+    #[default]
+    Auto,
+    Off,
+    On,
+}
+
+impl OptionAsAlt {
+    fn is_auto(&self) -> bool {
+        *self == Self::Auto
+    }
+}
+
 fn is_true(b: &bool) -> bool {
     *b
 }
@@ -355,6 +373,7 @@ impl Default for Person {
             ui_font: None,
             telemetry: true,
             clipboard_write: true,
+            option_as_alt: OptionAsAlt::Auto,
             appearance: Appearance::System,
             theme: None,
             colors: BTreeMap::new(),
@@ -387,6 +406,7 @@ pub struct Settings {
     /// 0..1: below 1, what's behind a terminal shows through.
     pub terminal_opacity: f32,
     pub clipboard_write: bool,
+    pub option_as_alt: OptionAsAlt,
     pub sounds: Sounds,
 }
 
@@ -425,6 +445,7 @@ impl Default for Settings {
             terminal_padding: [10.0, 6.0],
             terminal_opacity: 1.0,
             clipboard_write: true,
+            option_as_alt: OptionAsAlt::Auto,
             sounds: Sounds::default(),
         }
     }
@@ -460,6 +481,7 @@ impl Settings {
             terminal_opacity: look.terminal_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
             sounds: person.sounds.clone(),
             clipboard_write: person.clipboard_write,
+            option_as_alt: person.option_as_alt,
         }
     }
 }
@@ -574,6 +596,12 @@ pub fn write_person(person: &Person) -> std::io::Result<()> {
 
 /// Installs new settings; returns whether anything changed.
 pub fn set(s: Settings) -> bool {
+    #[cfg(target_os = "macos")]
+    gpui_macos::set_option_as_alt(match s.option_as_alt {
+        OptionAsAlt::Auto => None,
+        OptionAsAlt::Off => Some(false),
+        OptionAsAlt::On => Some(true),
+    });
     CURRENT.with(|c| {
         if *c.borrow().0 == s {
             return false;
@@ -737,6 +765,19 @@ mod tests {
         assert_eq!((own.font_family.as_str(), own.font_size, own.ui_font_family.as_str(), own.theme.as_str()), ("layout", 14.0, "layout-ui", "ink"));
         assert_eq!(own.colors["accent"], "#abcdef");
         assert_eq!(own.colors["text"], "#ffffff");
+    }
+
+    #[test]
+    fn option_as_alt_defaults_to_auto_and_round_trips() {
+        let default: Person = serde_json::from_str("{}").unwrap();
+        assert_eq!(default.option_as_alt, OptionAsAlt::Auto);
+        for (value, expected) in [("auto", OptionAsAlt::Auto), ("off", OptionAsAlt::Off), ("on", OptionAsAlt::On)] {
+            let person: Person = serde_json::from_value(serde_json::json!({"option_as_alt": value})).unwrap();
+            let settings = Settings::compose(&person, &crate::layout::Look::default(), true);
+            assert_eq!(settings.option_as_alt, expected);
+            assert_eq!(serde_json::to_value(settings).unwrap()["option_as_alt"], value);
+        }
+        assert!(serde_json::from_value::<Person>(serde_json::json!({"option_as_alt": "left"})).is_err());
     }
 
     #[test]
