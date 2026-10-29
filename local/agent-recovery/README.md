@@ -24,8 +24,39 @@ configs with direct argument arrays, for example:
 
 Keep normal vendor model/config/permission arguments; leave conversation selection
 to the managed actions; do not store starting prompts or inline secrets here.
-User settings, plugins, environment and normal native
-approvals stay in effect. The helper adds no capture hooks or daemon overrides.
+User settings, plugins, environment and normal native approvals stay in effect.
+Claude's two identity hooks below register plain shell launches too. Status stays
+native OSC 7501; the hooks only register recovery and clear deliberate exits.
+
+### Claude: plain shell launches
+
+Add these command hooks to Claude's user `settings.json`, preserving existing
+hooks. Replace the example paths with the installed helper/config and use your
+Python 3.11+ interpreter. The 20-second hook budget covers the short hook lock,
+the helper's five-second IPC deadline and connection close.
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{"hooks": [{"type": "command", "command": "python C:/stable/agent-recovery/agent_recovery.py claude-hook --config C:/stable/claude.json", "timeout": 20}]}],
+    "SessionEnd": [{"matcher": "prompt_input_exit|logout", "hooks": [{"type": "command", "command": "python C:/stable/agent-recovery/agent_recovery.py claude-hook --config C:/stable/claude.json", "timeout": 20}]}]
+  }
+}
+```
+
+New attended `claude` launches in Herdr enroll automatically, including launches
+through the menu. `SessionStart` supplies the actual native UUID on startup,
+resume, clear and foreground branch. `CLAUDE_PID` owns cleanup; a delayed exit
+from a different process cannot clear the current session. Background jobs,
+headless runs and subagents are ignored. `SessionEnd` clears only deliberate
+exit/logout; clear/resume handoffs, signal exits and a stopped core preserve the
+saved choice. Exiting Claude returns to the existing shell.
+
+The attendance gate uses Claude's engine-provided
+`CLAUDE_CODE_SESSION_ATTENDED=1`, validated with Claude Code 2.1.312. That flag is
+not a documented public API; missing/changed metadata leaves recovery inactive.
+`--bare`, safe mode and disabled hooks also leave plain launches unenrolled.
+Install the hooks on the host where Claude runs; viewer platform does not matter.
 
 In the personal app build, config presence opts that agent into local Windows
 menu starts. Reopen the menu after changing configs. Clicks and menu number keys
@@ -58,10 +89,10 @@ cannot. Managed New/Resume clear the prior binding. Recovery preserves
 the durable native ID. Only a user-selected explicit Resume can fall back before
 an initial native report; collected references never qualify.
 
-Claude New chooses a UUID and saves it with the launch directory before spawning
-`claude --session-id`. Recovery uses `--resume` with that exact UUID. Its pin stays
-fixed for the managed invocation; use managed New/Resume to retarget it rather
-than in-process New/Resume/Fork. No hook or transcript inspection is involved.
+The explicit Claude launcher can still choose a UUID with `--session-id`.
+Identity hooks replace that pin with Claude's actual attended main UUID and cwd,
+including in-process session changes. Recovery uses `--resume` with the saved
+UUID. No transcript inspection is involved.
 
 OSC is unauthenticated PTY output and has no persistence acknowledgement. An
 unprocessed/unsaved report or a brand-new empty conversation is not recoverable
@@ -78,9 +109,10 @@ status is retained, otherwise the helper returns an error.
 
 ## Rollback and checks
 
-Remove or rename the opt-in configs and reopen the menu. Run `hc keep <terminal>
+Remove these two recovery hook commands from Claude's user settings and remove
+or rename the opt-in configs, then reopen the menu. Run `hc keep <terminal>
 --off`, quit its managed agent, then remove the script. Inert helper documents may
-remain; no vendor hooks, settings or trust-store edits need reversal.
+remain. Other hooks/settings need no changes.
 
 ```powershell
 python -B -m unittest discover -s local/agent-recovery -p test_agent_recovery.py -v
