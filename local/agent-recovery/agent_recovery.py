@@ -210,7 +210,7 @@ def claude_hook(config_path, event):
     with terminal_lock(hook=True), Core() as core:
         recovery_schema(core)
         record = core.call("terminal.get", dict(terminal=terminal))
-        if record["state"] != "live" or record.get("scope") != scope["expected_scope"]:
+        if record["state"] != "live":
             return
         current = core.call("doc.get", dict(name=document_name(terminal)))
         if name == "SessionStart":
@@ -220,8 +220,9 @@ def claude_hook(config_path, event):
             cwd = str(Path(event["cwd"]).resolve(strict=True))
             if not Path(cwd).is_dir():
                 raise ValueError("session working directory is unavailable")
+            # Core validates HC_SCOPE here; its public terminal record deliberately omits it.
+            core.call("terminal.keep", dict(scope, keep=True, recovery=dict(argv=vendor_command(config, session_id), cwd=cwd)))
             claim(core, terminal, "claude", cwd, session_id, current=current, owner_pid=owner_pid)
-            core.call("terminal.keep", dict(scope, keep=True, recovery=recovery_command(config_path)))
         else:
             pin = current["value"]
             if pin and pin.get("agent") == "claude" and pin.get("session_id") == session_id and pin.get("owner_pid") == owner_pid:

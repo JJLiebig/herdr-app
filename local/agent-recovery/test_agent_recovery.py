@@ -61,7 +61,7 @@ class LaunchCore(DocumentCore):
             return dict(methods=[dict(name="terminal.keep", params=[dict(name=n) for n in names])],
                         components=dict(schemas=dict(Terminal=dict(properties=properties))))
         if method == "terminal.get":
-            return dict(address="t1", state="live", scope="scope", resume_session=self.native_id)
+            return dict(address="t1", state="live", resume_session=self.native_id)
         if method == "terminal.keep":
             if self.fail_keep:
                 raise RuntimeError("keep was not saved")

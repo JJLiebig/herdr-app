@@ -50,7 +50,9 @@ resume, clear and foreground branch. `CLAUDE_PID` owns cleanup; a delayed exit
 from a different process cannot clear the current session. Background jobs,
 headless runs and subagents are ignored. `SessionEnd` clears only deliberate
 exit/logout; clear/resume handoffs, signal exits and a stopped core preserve the
-saved choice. Exiting Claude returns to the existing shell.
+saved choice. Recovery runs the configured Claude argv with `--resume` directly,
+so core observes its native exit/signal lifecycle. Exiting Claude returns to the
+existing shell.
 
 The attendance gate uses Claude's engine-provided
 `CLAUDE_CODE_SESSION_ATTENDED=1`, validated with Claude Code 2.1.312. That flag is
