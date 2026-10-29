@@ -50,9 +50,13 @@ target="$os-$arch"
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 
 echo "package: herdr-app $version for $target"
+for notice in LICENSE THIRD-PARTY-NOTICES; do
+  [[ -s $notice ]] || { echo "package: $notice is missing or empty" >&2; exit 1; }
+done
 # Only release builds update themselves (src/update.rs).
 HERDR_APP_RELEASE=1 cargo build --release --locked ${triple:+--target "$triple"}
 
+if [[ $os == linux ]]; then export TMPDIR=${TMPDIR:-/var/tmp}; fi
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir -p dist
@@ -62,12 +66,16 @@ if [[ $os == linux || $os == windows ]]; then
   mkdir -p "$dir"
   if [[ $os == windows ]]; then cp "$bin/herdr-app.exe" "$dir/"; else cp "$bin/herdr-app" "$dir/"; fi
   cp assets/icons/herdr-ui-icon-clean.svg "$dir/herdr-app.svg"
+  cp LICENSE THIRD-PARTY-NOTICES "$dir/"
+  notices_path=herdr-app/THIRD-PARTY-NOTICES
   tar -czf "$out" -C "$work" herdr-app
 else
   app="$work/Herdr.app"
   mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
   cp "$bin/herdr-app" "$app/Contents/MacOS/Herdr"
   cp assets/icons/Herdr.icns "$app/Contents/Resources/Herdr.icns"
+  cp LICENSE THIRD-PARTY-NOTICES "$app/Contents/Resources/"
+  notices_path=Herdr.app/Contents/Resources/THIRD-PARTY-NOTICES
   cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -87,4 +95,7 @@ PLIST
   scripts/mac-sign "$app"
   tar -czf "$out" -C "$work" Herdr.app
 fi
+tar -xOf "$out" "$notices_path" | cmp - THIRD-PARTY-NOTICES
+license_path="${notices_path%/*}/LICENSE"
+tar -xOf "$out" "$license_path" | cmp - LICENSE
 echo "package: $out ($(sha256 "$out"))"

@@ -11,6 +11,9 @@ notes-check version:
 
 check: test
 
+notices:
+    bun scripts/notices.ts
+
 # Before a release: tests, docs, the next version's notes and clips, then what
 # changed since the last release, to review by hand.
 [unix]

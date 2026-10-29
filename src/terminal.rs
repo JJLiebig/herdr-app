@@ -766,7 +766,13 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
     // character (Option-s -> "\u{df}" on a Mac), not when it didn't (Alt-b on
     // Linux stays Alt-b).
     let mut consumed = mods & GHOSTTY_MODS_SHIFT as GhosttyMods;
-    if m.alt && text.as_deref().is_some_and(|t| !t.is_ascii()) {
+    let option_as_alt = {
+        #[cfg(target_os = "macos")]
+        { gpui_macos::option_as_alt() }
+        #[cfg(not(target_os = "macos"))]
+        { false }
+    };
+    if m.alt && !option_as_alt && text.as_deref().is_some_and(|t| !t.is_ascii()) {
         consumed |= GHOSTTY_MODS_ALT as GhosttyMods;
     }
     Some(vt.encode_key(key, mods, consumed, text.as_deref(), unshifted))
@@ -1468,6 +1474,21 @@ mod tests {
             is_held: false,
             prefer_character_input: false,
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn option_as_alt_encodes_legacy_and_kitty_shortcuts() {
+        gpui_macos::set_option_as_alt(Some(true));
+        let mut vt = Vt::new(20, 3);
+        for (key, text, bytes) in [("alt-p", "p", b"\x1bp"), ("alt-e", "e", b"\x1be"), ("alt-b", "b", b"\x1bb")] {
+            assert_eq!(key_bytes(&mut vt, &press(key, Some(text))).unwrap(), bytes);
+        }
+        vt.write(b"\x1b[>1u");
+        assert_eq!(key_bytes(&mut vt, &press("alt-e", Some("e"))).unwrap(), b"\x1b[101;3u");
+        vt.write(b"\x1b[<u");
+        gpui_macos::set_option_as_alt(Some(false));
+        assert_eq!(key_bytes(&mut vt, &press("alt-p", Some("π"))).unwrap(), "π".as_bytes());
     }
 
     #[test]

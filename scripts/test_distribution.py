@@ -4,6 +4,8 @@ Run: uv run --no-project python -m unittest discover -s scripts -p test_distribu
 """
 
 import os
+import shutil
+import tarfile
 from pathlib import Path
 import subprocess
 import tempfile
@@ -76,6 +78,53 @@ exit 97''')
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("unexpected download", result.stderr)
                 self.assertNotIn("Intel Macs", result.stderr)
+
+    def test_packages_keep_full_notices_on_every_platform(self):
+        checkout = self.bin / "checkout"
+        for path in [
+            "Cargo.toml", "LICENSE", "THIRD-PARTY-NOTICES", "scripts/package",
+            "assets/icons/herdr-ui-icon-clean.svg", "assets/icons/Herdr.icns",
+        ]:
+            destination = checkout / path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / path, destination)
+        sign = checkout / "scripts/mac-sign"
+        sign.write_text("#!/bin/sh\nexit 0\n")
+        sign.chmod(0o755)
+        release = checkout / "target/release"
+        release.mkdir(parents=True)
+        for name in ("herdr-app", "herdr-app.exe"):
+            (release / name).write_bytes(b"test binary")
+        self.stub("cargo", "exit 0")
+        for os_name, arch, target, prefix in (
+            ("Linux", "x86_64", "linux-x86_64", "herdr-app"),
+            ("Darwin", "arm64", "macos-aarch64", "Herdr.app/Contents/Resources"),
+            ("MINGW64_NT", "x86_64", "windows-x86_64", "herdr-app"),
+        ):
+            with self.subTest(target=target):
+                result = self.run_script(checkout / "scripts/package", os_name, arch)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                with tarfile.open(checkout / f"dist/herdr-app-{target}.tar.gz") as archive:
+                    for name in ("LICENSE", "THIRD-PARTY-NOTICES"):
+                        self.assertEqual(
+                            archive.extractfile(f"{prefix}/{name}").read(),
+                            (ROOT / name).read_bytes(),
+                        )
+        self.stub("cargo", 'echo "unexpected build" >&2; exit 97')
+        for name in ("LICENSE", "THIRD-PARTY-NOTICES"):
+            notice = checkout / name
+            original = notice.read_bytes()
+            for state in ("empty", "missing"):
+                with self.subTest(notice=name, state=state):
+                    if state == "empty":
+                        notice.write_bytes(b"")
+                    else:
+                        notice.unlink()
+                    result = self.run_script(checkout / "scripts/package", "Linux", "x86_64")
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn(f"{name} is missing or empty", result.stderr)
+                    self.assertNotIn("unexpected build", result.stderr)
+            notice.write_bytes(original)
 
     def test_supported_packages_still_try_build(self):
         for os_name, arch in (("Darwin", "arm64"), ("Linux", "x86_64"), ("Linux", "aarch64")):
