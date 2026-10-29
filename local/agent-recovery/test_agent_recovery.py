@@ -80,13 +80,13 @@ class RecoveryTests(unittest.TestCase):
         module = Path(helper.__file__).parents[2] / "defaults/mods/new-menu/main.js"
         code = r"""
 const fs = require('fs'), vm = require('vm'), assert = require('assert');
-let active = { id: 'local', active: true }, platform = 'windows', configured = true, calls = [];
+let active = { id: 'local', active: true }, platform = 'windows', configured = true, calls = [], reads = 0;
 const agent = { key: 'claude', name: 'Claude', run: ['native-claude'], installed: true };
 const cx = { focus_handle: () => ({focus(){}}), spawn: f => tasks.push(f(cx)), notify(){} };
 let tasks = [];
 const context = { View: class {}, Set, Promise, spaces: () => [active], window: () => ({platform}),
   appHome: () => 'C:/Herdr Space', knownAgents: async () => [agent],
-  readTextFile: async () => configured ? '{}' : null, run: (method, params) => calls.push({method,params}) };
+  readTextFile: async () => { reads++; return configured ? '{}' : null; }, run: (method, params) => calls.push({method,params}) };
 let source = fs.readFileSync(process.argv[1], 'utf8').replace(/^import .*;\r?\n/gm, '').replace('export default class', 'class');
 vm.runInNewContext(source + '; globalThis.Menu = NewMenu;', context);
 (async () => {
@@ -97,6 +97,9 @@ vm.runInNewContext(source + '; globalThis.Menu = NewMenu;', context);
   assert.equal(calls.at(-1).params.space, 'remote-now');
   active = { id: 'local', active: true }; platform = 'macos';
   menu.startAgent(agent); assert.equal(calls.at(-1).params.argv[0], 'native-claude');
+  platform = 'linux'; tasks = []; const beforeReads = reads;
+  const linux = new context.Menu(); linux.init({},cx); await Promise.all(tasks);
+  assert.equal(reads,beforeReads); linux.startAgent(agent); assert.equal(calls.at(-1).params.argv[0], 'native-claude');
   platform = 'windows'; configured = false; tasks = [];
   const absent = new context.Menu(); absent.init({},cx); await Promise.all(tasks);
   absent.startAgent(agent); assert.equal(calls.at(-1).params.argv[0], 'native-claude');

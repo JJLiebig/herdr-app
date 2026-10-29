@@ -12,7 +12,7 @@ export default class NewMenu extends View {
       try {
         const [agents] = await Promise.all([
           knownAgents({ on: spaces().find(s => s.active)?.machine }),
-          ...["claude", "codex"].map(async key => {
+          ...(window()?.platform === "windows" ? ["claude", "codex"] : []).map(async key => {
             try {
               if (await readTextFile(appHome() + "/local/agent-recovery/" + key + ".json") !== null) this.managed.add(key);
             } catch {}
