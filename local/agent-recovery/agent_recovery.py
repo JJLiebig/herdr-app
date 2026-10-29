@@ -7,7 +7,6 @@ import json
 import os
 from pathlib import Path
 import queue
-import shlex
 import signal
 import shutil
 import subprocess
@@ -52,7 +51,7 @@ class RpcError(RuntimeError):
 
 
 class Core:
-    """Same bounded hc connect transport as the retained capture experiment."""
+    """Bounded newline RPC connection to the terminal-owning core."""
 
     def __enter__(self):
         env = dict(os.environ, HC_SOCKET=os.environ["HC_TERMINAL_SOCKET"])
@@ -105,64 +104,23 @@ def document_name(terminal):
     return "herdr-main-" + terminal
 
 
-def claim(core, terminal, agent, cwd, session_id=None, source="startup", current=None):
+def claim(core, terminal, agent, cwd, session_id=None, current=None, explicit_resume=False):
     if current is None:
         current = core.call("doc.get", {"name": document_name(terminal)})
-    value = dict(invocation=str(uuid.uuid4()), agent=agent, cwd=cwd,
-                 expected_id=session_id, source=source,
-                 session_id=session_id if source == "resume" else None)
+    value = dict(invocation=str(uuid.uuid4()), agent=agent, cwd=cwd, session_id=session_id)
+    if explicit_resume:
+        value["explicit_resume"] = True
     # A competing managed launch wins or loses explicitly; never overwrite its claim.
     core.call("doc.set", dict(name=document_name(terminal), version=current["version"], value=value))
     return value
 
 
-def capture(core, terminal, invocation, agent, event):
-    if not isinstance(event, dict):
-        raise ValueError("session event must be an object")
-    if event.get("hook_event_name") != "SessionStart" or event.get("agent_id"):
-        return
-    current = core.call("doc.get", {"name": document_name(terminal)})
-    value = current["value"]
-    if not value or value["invocation"] != invocation or value["agent"] != agent or value["session_id"]:
-        return
-    expected = value["expected_id"]
-    if event.get("source") != value["source"]:
-        return
-    sid = event.get("session_id")
-    if expected and sid != expected:
-        return
-    if not isinstance(sid, str) or not sid.strip() or event.get("cwd") != value["cwd"]:
-        raise ValueError("startup identity or working directory does not match")
-    uuid.UUID(sid)
-    value = dict(value, session_id=sid)
-    try:
-        core.call("doc.set", dict(name=document_name(terminal), version=current["version"], value=value))
-    except RpcError as error:
-        if error.kind != "conflict":
-            raise
-        # Re-read once: a newer launch or another successful capture owns the pin.
-        newer = core.call("doc.get", {"name": document_name(terminal)})["value"]
-        if newer and (newer["invocation"] != invocation or newer["session_id"]):
-            return
-        raise
-
-
-def hook_command(agent):
-    # Both qualified Windows CLIs execute command hooks with a POSIX shell.
-    return shlex.join([sys.executable.replace("\\", "/"),
-                       str(Path(__file__).resolve()).replace("\\", "/"), "capture", agent])
-
-
 def vendor_command(config, session_id=None):
     agent = config["agent"]
     command = list(config["argv"])
-    hook = dict(hooks=[dict(type="command", command=hook_command(agent), timeout=10)])
     if agent == "claude":
-        command += ["--settings", json.dumps(dict(hooks=dict(SessionStart=[hook])))]
         command += ["--resume", session_id] if session_id else ["--session-id", str(uuid.uuid4())]
     elif agent == "codex":
-        handler = '{type="command",command=' + json.dumps(hook_command(agent)) + ',timeout=10}'
-        command += ["--no-daemon", "-c", 'hooks.SessionStart=[{hooks=[' + handler + ']}]']
         if session_id:
             command += ["resume", session_id]
     else:
@@ -198,16 +156,30 @@ def run(args):
         names = {p.get("name") for p in keep.get("params", [])}
         if not {"recovery", "expected_scope"}.issubset(names):
             raise RuntimeError("this core does not support managed recovery")
+        schemas = schema.get("components", {}).get("schemas", {})
+        if config["agent"] == "codex" and "resume_session" not in schemas.get("Terminal", {}).get("properties", {}):
+            raise RuntimeError("this core does not support native Codex session recovery")
+        if config["agent"] == "codex" and "session_token" not in schemas.get("Recovery", {}).get("properties", {}):
+            raise RuntimeError("this core does not support native session correlation")
         record = core.call("terminal.get", dict(terminal=terminal))
         if record["address"] != terminal or record["state"] != "live":
             raise RuntimeError("terminal is not live")
         current = None
+        explicit_resume = config["agent"] == "codex" and args.action == "resume"
         if args.action == "recover":
             current = core.call("doc.get", dict(name=document_name(terminal)))
             pin = current["value"]
-            if not pin or not pin["session_id"] or pin["agent"] != config["agent"]:
-                raise RuntimeError("no captured main conversation; use managed new or resume")
-            cwd, session_id = pin["cwd"], pin["session_id"]
+            if not pin or pin["agent"] != config["agent"]:
+                raise RuntimeError("no main conversation identity; use managed new or resume")
+            cwd = pin["cwd"]
+            if config["agent"] == "codex":
+                session_id = record.get("resume_session")
+                if not session_id and pin.get("explicit_resume") is True:
+                    session_id, explicit_resume = pin["session_id"], True
+            else:
+                session_id = pin["session_id"]
+            if not session_id:
+                raise RuntimeError("no main conversation identity; use managed new or resume")
         else:
             cwd = str(Path(args.cwd or os.getcwd()).resolve(strict=True))
         if not Path(cwd).is_dir():
@@ -215,15 +187,23 @@ def run(args):
         if session_id:
             uuid.UUID(session_id)
         command = vendor_command(config, session_id)
-        # Claude lets us preallocate the root ID; Codex reports its initial startup ID.
+        # Native Codex identities remain in core; only explicit selections can be a fallback.
         expected = session_id or (command[-1] if config["agent"] == "claude" else None)
+        if config["agent"] == "codex" and args.action == "recover" and not explicit_resume:
+            expected = None
         invocation = claim(core, terminal, config["agent"], cwd, expected,
-                           "resume" if session_id else "startup", current=current)
+                           current=current, explicit_resume=explicit_resume)
         recovery = dict(argv=[sys.executable, str(Path(__file__).resolve()), "recover", "--config", str(config_path)],
                         cwd=str(Path(__file__).resolve().parent))
-        core.call("terminal.keep", dict(terminal=terminal, keep=True, recovery=recovery,
-                                        expected_scope=os.environ["HC_SCOPE"]))
-    env = dict(os.environ, HERDR_MAIN_INVOCATION=invocation["invocation"])
+        if config["agent"] == "codex":
+            recovery["session_token"] = invocation["invocation"]
+        scope = dict(terminal=terminal, expected_scope=os.environ["HC_SCOPE"])
+        if args.action != "recover":
+            core.call("terminal.keep", dict(scope, keep=False))
+        core.call("terminal.keep", dict(scope, keep=True, recovery=recovery))
+    env = dict(os.environ)
+    if config["agent"] == "codex":
+        env["HERDR_MAIN_INVOCATION"] = invocation["invocation"]
     return child(command, cwd, env)
 
 
@@ -236,23 +216,19 @@ def disarm():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("new", "resume", "recover", "capture"))
-    parser.add_argument("agent", nargs="?", choices=("claude", "codex"))
-    parser.add_argument("--config")
+    parser.add_argument("action", choices=("new", "resume", "recover"))
+    parser.add_argument("--config", required=True)
     parser.add_argument("--cwd")
     parser.add_argument("--session-id")
     args = parser.parse_args()
+    if args.session_id and args.action != "resume":
+        parser.error("--session-id selects a conversation only with resume")
     fallback = False
     try:
-        if args.action == "capture":
-            with Core() as core:
-                capture(core, os.environ["HC_TERMINAL_ID"], os.environ["HERDR_MAIN_INVOCATION"],
-                        args.agent, json.load(sys.stdin.buffer))
-            return 0
         with terminal_lock():
             try:
-                if not args.config or (args.action == "resume" and not args.session_id):
-                    raise ValueError("supply --config and an explicit --session-id for resume")
+                if args.action == "resume" and not args.session_id:
+                    raise ValueError("supply an explicit --session-id for resume")
                 result = run(args)
             except (OSError, ValueError, RuntimeError, KeyError, TypeError) as error:
                 if isinstance(error, RpcError) and error.kind == "conflict":

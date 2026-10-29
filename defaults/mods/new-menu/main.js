@@ -1,14 +1,25 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { theme, spaces, panes, knownAgents, run, openOverlay, closeOverlay, props, window } from "herdr";
+import { theme, spaces, panes, knownAgents, run, openOverlay, closeOverlay, props, window, appHome, readTextFile } from "herdr";
 
 export default class NewMenu extends View {
   init(_props, cx) {
     this.agents = [];
+    this.managed = new Set();
     this.handle = cx.focus_handle();
     this.handle.focus();
     cx.spawn(async cx => {
-      try { this.agents = await knownAgents({ on: spaces().find(s => s.active)?.machine }); }
+      try {
+        const [agents] = await Promise.all([
+          knownAgents({ on: spaces().find(s => s.active)?.machine }),
+          ...["claude", "codex"].map(async key => {
+            try {
+              if (await readTextFile(appHome() + "/local/agent-recovery/" + key + ".json") !== null) this.managed.add(key);
+            } catch {}
+          }),
+        ]);
+        this.agents = agents;
+      }
       catch { this.failed = true; }
       cx.notify();
     });
@@ -19,6 +30,14 @@ export default class NewMenu extends View {
       .text_color(enabled ? t.foreground : t.dim).when(enabled, el => el.hover(s => s.bg(t.selected)))
       .on_click(() => { if (enabled) { closeOverlay(props().overlay); action(); } })
       .child(icon).child(div().flex_1().child(name)).child(div().text_size(11).text_color(t.dim).child(hint));
+  }
+  startAgent(agent) {
+    const space = spaces().find(s => s.active);
+    const managed = !space?.machine && window()?.platform === "windows" && this.managed.has(agent.key);
+    const argv = managed
+      ? ["python", appHome() + "/local/agent-recovery/agent_recovery.py", "new", "--config", appHome() + "/local/agent-recovery/" + agent.key + ".json"]
+      : agent.run;
+    run("tab.new", { name: agent.name, space: space?.id, argv });
   }
   render() {
     const t = theme();
@@ -33,7 +52,7 @@ export default class NewMenu extends View {
         const agent = /^[1-9]$/.test(e.key) ? installed[Number(e.key) - 1] : null;
         if (!agent && e.key !== "t" && e.key !== "n") return;
         closeOverlay(props().overlay);
-        if (agent) run("tab.new", { name: agent.name, space: space?.id, argv: agent.run });
+        if (agent) this.startAgent(agent);
         else if (e.key === "t") run("tab.new", { space: space?.id });
         else run("space.new");
       })
@@ -41,7 +60,7 @@ export default class NewMenu extends View {
       .child(div().px(9).pt(8).pb(4).text_size(11).text_color(t.dim).child("Start an agent"))
       .child(v_flex().flex_1().min_h(0).overflow_y_scrollbar()
         .children(choices.map((a, i) => this.row(a.key, a.tint ? svg(a.icon).size(14).text_color(t.foreground) : image(a.icon).size(14), a.name,
-          () => run("tab.new", { name: a.name, space: space?.id, argv: a.run }), a.installed ? (i < 9 ? `${mod} ${i + 1}` : "") : "not installed", a.installed)))
+          () => this.startAgent(a), a.installed ? (i < 9 ? `${mod} ${i + 1}` : "") : "not installed", a.installed)))
         .when(this.agents.length === 0, el => el.child(div().px(9).py(6).text_color(t.dim).child(this.failed ? "Could not load agents" : "Checking installed agents…"))))
       .child(div().h(1).mx(4).my(5).bg(t.border))
       .child(this.row("space", div().w(14).child("+"), "New space", () => run("space.new"), `${mod} N`))
