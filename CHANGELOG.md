@@ -1,5 +1,10 @@
 # Herdr changelog
 
+## [0.1.7] - 2026-10-29
+
+### Fixed
+- Herdr no longer freezes when a terminal shows an older Nerd Font icon it has no picture for, like some powerlevel10k battery icons. It draws them as text instead.
+
 ## [0.1.6] - 2026-10-29
 
 ### New

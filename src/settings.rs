@@ -313,6 +313,9 @@ pub struct Person {
     /// Anonymous usage data (telemetry.rs). On unless set to false.
     #[serde(skip_serializing_if = "is_true")]
     pub telemetry: bool,
+    /// Allow terminal programs (including remote ones) to copy text locally.
+    #[serde(skip_serializing_if = "is_true")]
+    pub clipboard_write: bool,
     /// Light or dark: the system's, or one always.
     #[serde(skip_serializing_if = "Appearance::is_system")]
     pub appearance: Appearance,
@@ -351,6 +354,7 @@ impl Default for Person {
             font_size: None,
             ui_font: None,
             telemetry: true,
+            clipboard_write: true,
             appearance: Appearance::System,
             theme: None,
             colors: BTreeMap::new(),
@@ -382,6 +386,7 @@ pub struct Settings {
     pub terminal_padding: [f32; 2],
     /// 0..1: below 1, what's behind a terminal shows through.
     pub terminal_opacity: f32,
+    pub clipboard_write: bool,
     pub sounds: Sounds,
 }
 
@@ -419,6 +424,7 @@ impl Default for Settings {
             colors: BTreeMap::new(),
             terminal_padding: [10.0, 6.0],
             terminal_opacity: 1.0,
+            clipboard_write: true,
             sounds: Sounds::default(),
         }
     }
@@ -453,6 +459,7 @@ impl Settings {
             terminal_padding: look.terminal_padding.unwrap_or(d.terminal_padding),
             terminal_opacity: look.terminal_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
             sounds: person.sounds.clone(),
+            clipboard_write: person.clipboard_write,
         }
     }
 }
@@ -733,6 +740,15 @@ mod tests {
     }
 
     #[test]
+    fn program_clipboard_writes_default_on_and_can_be_disabled() {
+        let default: Person = serde_json::from_str("{}").unwrap();
+        assert!(default.clipboard_write);
+        let off: Person = serde_json::from_str(r#"{"clipboard_write":false}"#).unwrap();
+        assert!(!Settings::compose(&off, &crate::layout::Look::default(), true).clipboard_write);
+        assert_eq!(serde_json::to_value(off).unwrap()["clipboard_write"], false);
+    }
+
+    #[test]
     fn shipped_looks_and_theme_clicks_have_the_same_precedence() {
         use crate::layout::{Node, ThemeChoice};
         let person = Person { font_size: Some(19.0), theme: Some(ThemeChoice::One("moss".into())), ..Person::default() };
@@ -757,7 +773,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();

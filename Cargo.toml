@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/ghostty-sys"]
-exclude = ["vendor/gpui-kit", "vendor/gpui-pre", "vendor/gpui-pre-wgpu", "vendor/gpui-pre-apple", "vendor/gpui-pre-linux", "vendor/gpui-pre-macos", "vendor/gpui-pre-windows", "vendor/taffy", "vendor/quickjs-jit-runtime"]
+exclude = ["vendor/gpui-kit", "vendor/gpui-pre", "vendor/gpui-pre-wgpu", "vendor/gpui-pre-apple", "vendor/gpui-pre-linux", "vendor/gpui-pre-macos", "vendor/gpui-pre-windows", "vendor/taffy", "vendor/quickjs-jit-runtime", "vendor/zed-xim", "vendor/xim-ctext"]
 resolver = "2"
 
 [workspace.package]
@@ -10,7 +10,7 @@ publish = false
 
 [package]
 name = "herdr-app"
-version = "0.1.6"
+version = "0.1.7"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
@@ -24,7 +24,7 @@ gpui-base = { path = "vendor/gpui-kit/crates/base" }
 anyhow = "1"
 async-channel = "2"
 base64 = "0.22"
-image = { version = "0.25", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png", "tiff", "bmp"] }
 png = "0.17"
 ttf-parser = "0.25"
 smallvec = "1"
@@ -73,6 +73,9 @@ rquickjs = { path = "vendor/gpui-kit/crates/shell/rquickjs-compat" }
 gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
 # Our copy: snapping a maximized window to a half kept its old size (HERDR:).
 gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
+# HERDR: XIM's Latin-1/COMPOUND_TEXT must decode without panicking.
+zed-xim = { path = "vendor/zed-xim" }
+xim-ctext = { path = "vendor/xim-ctext" }
 # Our copy: Windows completes dead keys through native text input (HERDR:).
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 # Our copy: a flex item's min-content was measured even when unused (HERDR:).

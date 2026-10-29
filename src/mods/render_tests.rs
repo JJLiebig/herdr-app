@@ -218,12 +218,22 @@ fn describe(
     update: Value,
     setup: Option<&str>,
 ) -> anyhow::Result<String> {
+    describe_with_values(cx, staged, entry, fixture(populated, props, update), setup)
+}
+
+fn describe_with_values(
+    cx: &mut TestAppContext,
+    staged: &Staged,
+    entry: &str,
+    values: BTreeMap<String, Value>,
+    setup: Option<&str>,
+) -> anyhow::Result<String> {
     let calls = Rc::new(RefCell::new(Calls::default()));
     static NEXT_STORE: AtomicU64 = AtomicU64::new(0);
     let policy = Policy::new()
         .with_storage_path(staged.0.join(format!("store-{}.json", NEXT_STORE.fetch_add(1, Ordering::Relaxed))))
         .with_capabilities(Capabilities::new().storage(true).read_roots([staged.0.clone()]))
-        .with_host_module(module(fixture(populated, props, update), calls.clone()))?;
+        .with_host_module(module(values, calls.clone()))?;
     let runtime = ShellRuntime::new_isolated()?;
     let root = setup.map(|s| staged.wrapper(entry, s)).unwrap_or_else(|| staged.0.join(entry));
     let window = cx.add_window(|_, _| Empty);
@@ -262,6 +272,38 @@ fn shipped_initial_descriptions(cx: &mut TestAppContext) {
         entries.len(),
         start.elapsed()
     );
+}
+
+#[gpui::test]
+fn tabs_leave_room_for_macos_traffic_lights(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (platform, titlebar, fullscreen, width, lights, zoom, expected) in [
+        ("macos", "none", false, 44, true, 1.0, 32),
+        ("macos", "none", false, 44, true, 0.5, 108),
+        ("macos", "none", false, 44, true, 2.0, 10),
+        ("macos", "none", false, 60, true, 1.0, 16),
+        ("macos", "none", false, 76, true, 1.0, 10),
+        ("macos", "none", false, 268, true, 1.0, 10),
+        ("macos", "none", true, 44, true, 1.0, 10),
+        ("macos", "system", false, 44, true, 1.0, 10),
+        ("macos", "none", false, 44, false, 1.0, 10),
+        ("linux", "none", false, 44, true, 1.0, 10),
+        ("windows", "none", false, 44, true, 1.0, 10),
+    ] {
+        let mut values = fixture(true, props(), updates("current", "current"));
+        values.insert("window".into(), json!({"platform":platform,"titlebar":titlebar,"fullscreen":fullscreen,"buttons":false}));
+        values.get_mut("settings").unwrap()["zoom"] = json!(zoom);
+        let layout = values.get_mut("layout").unwrap();
+        layout["children"][0]["size"]["px"] = json!(width);
+        if !lights {
+            layout.as_object_mut().unwrap().remove("traffic_lights");
+        }
+        let tree = describe_with_values(cx, &staged, "mods/tabs", values, None).unwrap();
+        let root = tree.lines().next().unwrap();
+        assert!(root.contains(&format!(".pl[Number({expected}.0)]")), "{platform}/{titlebar}/{fullscreen}/{width}/{lights}: {tree}");
+        assert!(tree.contains("tab-tab1"), "first tab must remain visible: {tree}");
+    }
 }
 
 #[gpui::test]

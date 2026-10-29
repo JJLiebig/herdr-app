@@ -3,7 +3,28 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props } from "herdr";
+import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout } from "herdr";
+
+function find(node, id) {
+  if (node?.id === id) return node;
+  for (const child of node?.children ?? []) {
+    const found = find(child, id);
+    if (found) return found;
+  }
+  return null;
+}
+
+// The sidebar's rail goes by its width, not a flag: dragging its edge narrows it too.
+const narrow = () => (find(layout(), "sidebar")?.size?.px ?? Infinity) < 160;
+
+// To the rail (on macOS wide enough for the traffic lights), or back to the width it had.
+function toggleSidebar() {
+  const width = find(layout(), "sidebar")?.size?.px;
+  if (!narrow()) setShared("sidebar.width", width);
+  // Mods edited before the rail went by width still read the flag.
+  setShared("sidebar.collapsed", !narrow());
+  run("layout.resize", { id: "sidebar", px: narrow() ? (shared("sidebar.width") ?? 268) : window()?.platform === "macos" ? 76 : 44 });
+}
 
 const clean = (s) => (s ?? "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
 
@@ -189,7 +210,7 @@ export default class Agents extends View {
   render(cx) {
     const t = theme();
     if (props()?.sortMenu) return this.sortMenu(t);
-    const collapsed = shared("sidebar.collapsed") === true;
+    const collapsed = narrow();
     const sort = sortOf();
     let list = agents();
     this.listed = new Map(list.map((a) => [a.address, a.status]));
@@ -403,7 +424,7 @@ export default class Agents extends View {
         ),
       )
       .when(list.length === 0 && !collapsed, (el) =>
-        el.child(div().px(12).text_size(12).text_color(t.dim).child("No agents yet. Start one from + in the tabs.")),
+        el.child(div().px(12).text_size(12).text_color(t.dim).child("No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not.")),
       )
       .child(v_flex().id("ag-list").flex_1().min_h(0).px(collapsed ? 0 : 8).overflow_y_scrollbar().mode("always").children(rows))
       .child(
@@ -419,11 +440,7 @@ export default class Agents extends View {
               .text_size(13)
               .text_color(t.dim)
               .hover((s) => s.text_color(t.foreground))
-              .on_click(() => {
-                const next = !collapsed;
-                setShared("sidebar.collapsed", next);
-                run("layout.resize", { id: "sidebar", px: next ? 44 : (shared("sidebar.width") ?? 240) });
-              })
+              .on_click(toggleSidebar)
               .child(collapsed ? "»" : ""),
           ),
       );

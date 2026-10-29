@@ -31,6 +31,42 @@ use std::time::{Duration, Instant, SystemTime};
 const HEADER_HEIGHT: f32 = 30.0;
 const HANDLE: f32 = 6.0;
 
+// The three native buttons plus their trailing breathing room (also used by the tabs mod).
+const TRAFFIC_LIGHT_WIDTH: f32 = 64.0;
+
+fn traffic_light_divider_inset(n: &Node, axis: Axis, index: usize, macos: bool, zoom: f32) -> f32 {
+    if !macos || axis != Axis::Row || n.titlebar != Some(crate::layout::Titlebar::Layout) {
+        return 0.0;
+    }
+    let Some([x, _]) = n.traffic_lights else { return 0.0 };
+    let shown: Vec<_> = n.children().iter().filter(|child| !child.hidden).collect();
+    let mut edge = n.padding.map_or(0.0, |padding| padding.axes().1)
+        + index as f32 * (n.gap.unwrap_or(0.0) + n.divider.as_ref().map_or(0.0, |line| line.width));
+    for child in shown.iter().take(index + 1) {
+        let Some(Span::Px { px }) = child.size else { return 0.0 };
+        edge += px;
+    }
+    if edge * zoom < x || edge * zoom > x + TRAFFIC_LIGHT_WIDTH {
+        return 0.0;
+    }
+    // Keep the toolbar continuous above the rail; the divider starts with the content.
+    shown.iter().skip(index).take(2).filter_map(|column| {
+        let header = column.children().iter().find(|child| !child.hidden)?;
+        match header.size {
+            Some(Span::Px { px }) if header.window_drag => Some(px),
+            _ => None,
+        }
+    }).reduce(f32::min).unwrap_or(0.0)
+}
+
+fn separator_line(row: bool, width: f32, color: Hsla, top: f32) -> Div {
+    div().bg(color)
+        .when(row, |d| d.w(px(width)))
+        .when(row && top == 0.0, |d| d.h_full())
+        .when(row && top > 0.0, |d| d.absolute().top(px(top)).bottom_0())
+        .when(!row, |d| d.h(px(width)).w_full())
+}
+
 fn c(name: &str) -> Hsla {
     settings::color_or_literal(name)
 }
@@ -69,6 +105,28 @@ pub fn shell() -> String {
         return if pwsh { "pwsh.exe" } else { "powershell.exe" }.into();
     }
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+}
+
+fn unix_agent_argv(sh: String, cmd: Vec<String>) -> Vec<String> {
+    let script = if std::path::Path::new(&sh).file_name().and_then(|s| s.to_str()) == Some("fish") {
+        "command $argv[2..]; exec $argv[1] -i"
+    } else {
+        "\"$@\"; exec \"$0\" -i"
+    };
+    let mut run = vec![sh.clone(), "-ic".into(), script.into(), sh];
+    run.extend(cmd);
+    run
+}
+
+fn launch_failure(record: &Value, output: &str) -> Option<String> {
+    let code = record["exit_code"].as_i64().filter(|c| *c != 0)?;
+    let elapsed = record["finished_ms"].as_u64()?.checked_sub(record["created_ms"].as_u64()?)?;
+    if record["reason"].as_str() != Some("exited") || elapsed > 2000 {
+        return None;
+    }
+    let lines = output.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>();
+    let tail = lines[lines.len().saturating_sub(5)..].join("\n");
+    Some(if tail.is_empty() { format!("Exit code {code}") } else { format!("Exit code {code}\n{tail}") })
 }
 
 /// The shipped layouts (defaults/layouts): `main` is Herdr's window (spaces
@@ -2057,6 +2115,9 @@ impl AppWindow {
             self.focused_pane = None;
             return self.sync(window, cx);
         }
+        if let Some(address) = self.model.address_of(block) {
+            self.notify_launch_failure(&address, window, cx);
+        }
         if let Some(o) = self.overlays.iter().find(|o| o.layout.as_ref().is_some_and(|l| l.find(block).is_some())) {
             let id = o.id.clone();
             return self.close_overlay(&id, window, cx);
@@ -2078,6 +2139,27 @@ impl AppWindow {
             }
         }
         // Otherwise the next listing checks closure; core owns lost terminals.
+    }
+
+    fn notify_launch_failure(&mut self, address: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.born.borrow_mut().remove(address).is_none() {
+            return;
+        }
+        let core = self.core.clone();
+        let address = address.to_owned();
+        cx.spawn_in(window, async move |this, cx| {
+            let failure = cx.background_executor().spawn(async move {
+                let record = core.call("terminal.get", json!({"terminal": address})).ok()?;
+                launch_failure(&record, "")?;
+                let output = core.call("terminal.read", json!({"terminal": address, "lines": 5})).unwrap_or(Value::Null);
+                launch_failure(&record, output["text"].as_str().unwrap_or_default())
+            }).await;
+            if let Some(body) = failure {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.open_overlay(mods::new_overlay_id(), json!({"kind":"toast", "notification":{"title":"Terminal failed to start", "body":body, "level":"error"}}), window, cx);
+                });
+            }
+        }).detach();
     }
 
     // ---- creating terminals ------------------------------------------------
@@ -2149,9 +2231,7 @@ impl AppWindow {
                 // PowerShell has no `-ic`: run it, then stay. `&` finds npm's `.cmd` shims too.
                 return vec![sh, "-NoExit".into(), "-Command".into(), crate::programs::powershell_line(&cmd)];
             }
-            let mut run = vec![sh.clone(), "-ic".into(), "\"$@\"; exec \"$0\" -i".into(), sh];
-            run.extend(cmd);
-            run
+            unix_agent_argv(sh, cmd)
         })
     }
 
@@ -2254,6 +2334,7 @@ impl AppWindow {
                 let mut changed = false;
                 for (pane, addr) in closed {
                     if this.model.address_of(&pane).as_deref() == Some(&addr) {
+                        this.notify_launch_failure(&addr, window, cx);
                         this.model.remove_pane(&pane);
                         changed = true;
                     }
@@ -2265,8 +2346,9 @@ impl AppWindow {
 
     fn just_born(&self, addr: &str) -> bool {
         let mut born = self.born.borrow_mut();
-        born.retain(|_, t| t.elapsed() < Duration::from_secs(5));
-        born.contains_key(addr)
+        // Keep launch facts until hidden panes have passed through `check_closed`.
+        born.retain(|_, t| t.elapsed() < Duration::from_secs(30));
+        born.get(addr).is_some_and(|t| t.elapsed() < Duration::from_secs(5))
     }
 
     /// Gives a running terminal without a pane (a sub-agent, say) one in the
@@ -3783,7 +3865,13 @@ impl AppWindow {
         let mut sep = div().flex_none().relative().flex().items_center().justify_center();
         sep = if row { sep.w(px(width)).h_full() } else { sep.h(px(width)).w_full() };
         if let Some((w, color)) = line {
-            sep = sep.child(div().bg(color).when(row, |d| d.w(px(w)).h_full()).when(!row, |d| d.h(px(w)).w_full()));
+            let top = traffic_light_divider_inset(n, axis, index, cfg!(target_os = "macos"), zoom) * zoom;
+            if top > 0.0
+                && let Some(Paint::Color(background)) = n.children().iter().filter(|child| !child.hidden).nth(index).and_then(|child| child.background.as_ref())
+            {
+                sep = sep.bg(c(background));
+            }
+            sep = sep.child(separator_line(row, w, color, top));
         }
         if n.resizable() {
             let container = n.id.clone();
@@ -4393,6 +4481,7 @@ impl Render for AppWindow {
                 if ev.pressed_button != Some(MouseButton::Left) {
                     this.drag = None;
                     this.save();
+                    this.publish(cx);
                     return;
                 }
                 this.drag_to(ev.position);
@@ -4402,6 +4491,8 @@ impl Render for AppWindow {
                 this.drag_from = None;
                 if this.drag.take().is_some() {
                     this.save();
+                    // Mods see the new sizes (the sidebar picks its rail by width).
+                    this.publish(cx);
                     this.flush_documents(false, window, cx);
                 }
             }))
@@ -4418,6 +4509,72 @@ impl Render for AppWindow {
 mod tests {
     use gpui::{div, point, px, size, Context, IntoElement, Render, TestAppContext, Window};
     use gpui::prelude::*;
+
+    #[test]
+    fn agent_commands_keep_arguments_out_of_shell_source() {
+        let cmd = vec!["agent".to_owned(), "a 'quoted' task; $(not-a-command)\nnext line".to_owned(), "".to_owned()];
+        for sh in ["/bin/bash", "/bin/zsh", "/bin/sh", "/bin/dash", "/bin/fish"] {
+            let run = super::unix_agent_argv(sh.into(), cmd.clone());
+            assert_eq!(run[0], sh);
+            assert_eq!(run[1], "-ic");
+            assert_eq!(run[3], sh);
+            assert_eq!(run[4..], cmd);
+            assert_eq!(run[2], if sh.ends_with("/fish") { "command $argv[2..]; exec $argv[1] -i" } else { "\"$@\"; exec \"$0\" -i" });
+        }
+    }
+
+    #[test]
+    fn early_launch_failures_show_exit_code_and_last_output_lines() {
+        let mut record = serde_json::json!({"reason":"exited", "exit_code":127, "created_ms":1000, "finished_ms":3000});
+        assert_eq!(super::launch_failure(&record, "old\none\ntwo\nthree\nfour\nfive\n\n").as_deref(), Some("Exit code 127\none\ntwo\nthree\nfour\nfive"));
+        assert_eq!(super::launch_failure(&record, "").as_deref(), Some("Exit code 127"));
+        record["exit_code"] = 0.into();
+        assert!(super::launch_failure(&record, "").is_none());
+        record["exit_code"] = 1.into();
+        record["finished_ms"] = 3001.into();
+        assert!(super::launch_failure(&record, "").is_none());
+        record["finished_ms"] = 999.into();
+        assert!(super::launch_failure(&record, "").is_none());
+        record["finished_ms"] = 2000.into();
+        record["reason"] = "killed".into();
+        assert!(super::launch_failure(&record, "").is_none());
+        assert!(super::launch_failure(&serde_json::Value::Null, "").is_none());
+    }
+
+    #[gpui::test]
+    fn traffic_light_dividers_start_below_the_toolbar(cx: &mut TestAppContext) {
+        use std::{cell::Cell, rc::Rc};
+        let mut layout: crate::layout::Node = serde_json::from_str(include_str!("../defaults/layouts/main.json")).unwrap();
+        let context = cx.add_empty_window();
+        for (macos, titlebar, width, zoom, expected) in [
+            (true, crate::layout::Titlebar::Layout, 44.0, 1.0, 42.0),
+            (true, crate::layout::Titlebar::Layout, 90.0, 0.75, 42.0),
+            (true, crate::layout::Titlebar::Layout, 60.0, 1.5, 0.0),
+            (true, crate::layout::Titlebar::Layout, 60.0, 1.0, 42.0),
+            (true, crate::layout::Titlebar::Layout, 76.0, 1.0, 42.0),
+            (true, crate::layout::Titlebar::Layout, 268.0, 1.0, 0.0),
+            (false, crate::layout::Titlebar::Layout, 44.0, 1.0, 0.0),
+            (true, crate::layout::Titlebar::System, 44.0, 1.0, 0.0),
+        ] {
+            layout.titlebar = Some(titlebar);
+            layout.children_mut().unwrap()[0].size = Some(crate::layout::Size::Px { px: width });
+            let top = super::traffic_light_divider_inset(&layout, crate::layout::Axis::Row, 0, macos, zoom);
+            assert_eq!(top, expected);
+            let bounds = Rc::new(Cell::new(gpui::Bounds::default()));
+            let observed = bounds.clone();
+            context.draw(point(px(0.0), px(0.0)), size(px(1.0), px(100.0)), move |_, _| {
+                div().size_full().relative().flex().items_center().justify_center().child(
+                    super::separator_line(true, 1.0, gpui::rgb(0xffffff).into(), top).child(
+                        gpui::canvas(move |bounds, _, _| observed.set(bounds), |_, _, _, _| {}).size_full()
+                    )
+                )
+            });
+            assert_eq!(bounds.get().origin.y, px(expected));
+            assert_eq!(bounds.get().size.height, px(100.0 - expected));
+        }
+        layout.traffic_lights = None;
+        assert_eq!(super::traffic_light_divider_inset(&layout, crate::layout::Axis::Row, 0, true, 1.0), 0.0);
+    }
 
     #[gpui::test]
     fn fitted_popups_use_their_rendered_size_at_the_window_edge(cx: &mut TestAppContext) {

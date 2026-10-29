@@ -55,7 +55,10 @@ herdr-app do pane.split '{"direction":"right","pane":"p12"}'
 It prints the created IDs (for example `{ "pane": "...", "terminal": "..." }`)
 or `{ "error": "..." }` and exits 1. Read the result, then inspect `ls` or
 `status` to confirm. Commands invoked by an agent never open a missing-argument
-dialog: supply all required arguments.
+dialog: supply all required arguments. A successful launch reply means the
+terminal was created, not that its program started correctly. If it exits
+with a nonzero code within two seconds, the window shows an error toast with
+the exit code and last output lines.
 
 A terminal started with hc opts into the window with `herdr.space=<id>`.
 `herdr.tab=<id>` chooses its tab; without it, Herdr creates a tab in that space.
