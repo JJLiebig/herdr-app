@@ -7,9 +7,9 @@ endpoint and never starts a stopped core.
 ## Setup
 
 Requires Python 3.11+ and the personal core advertising scoped recovery,
-`Terminal.resume_session` and `Recovery.session_token`, and the Codex++ build
-emitting native OSC 7501 `session=` plus `sessiontoken=`. Stock Codex is not the
-supported producer. Claude uses its native `--session-id` / `--resume` contract.
+`Terminal.resume_session`, and the Codex++ build emitting native OSC 7501
+`session=`. Stock Codex is not the supported producer. Claude uses its native
+`--session-id` / `--resume` contract.
 
 Copy `agent_recovery.py` to the app home at `local/agent-recovery/`. Create sibling
 configs with direct argument arrays, for example:
@@ -31,6 +31,8 @@ In the personal app build, config presence opts that agent into local Windows
 menu starts. Reopen the menu after changing configs. Clicks and menu number keys
 share the launcher; current remote spaces, other platforms/agents and absent
 configs retain their normal command. Global keys and `programs.json` are unchanged.
+An opted-in local entry can launch its configured executable even when the stock
+command is absent from PATH.
 
 Manual launch inside the intended terminal:
 
@@ -42,14 +44,17 @@ python C:/stable/agent-recovery/agent_recovery.py resume --config C:/stable/code
 Both accept `--cwd <directory>` and otherwise use the shell's current directory.
 Recovery keeps that launcher directory. Codex retains its native saved-directory
 policy and may ask its usual directory question.
+Recovery uses the core's environment, not later shell/profile changes. Set a
+required native home or PATH on that core (or with `hc run --env NAME=value`);
+use supported explicit vendor arguments for config selection. No environment
+snapshot or secret map is stored by the helper.
 
 ## Identity and limits
 
 Codex++ reports its persistable main, not the displayed side conversation. Core
-saves matching live root reports against the invocation UUID in the recovery
-recipe and `HERDR_MAIN_INVOCATION`; old queued reports cannot bind a newer launch.
-In-process New/Resume/Fork can replace the native main; `/side` cannot. Managed
-New/Resume clear the prior binding. Recovery rotates the token without clearing
+saves the latest reported main session from live root reports while recovery is
+registered. In-process New/Resume/Fork can replace the native main; `/side`
+cannot. Managed New/Resume clear the prior binding. Recovery preserves
 the durable native ID. Only a user-selected explicit Resume can fall back before
 an initial native report; collected references never qualify.
 
@@ -66,7 +71,10 @@ Native missing-history errors stay visible; there is no unrelated New fallback.
 Setup/missing-identity/directory errors open a shell only after durable recovery
 clear and lock release. If clearing fails, both errors are reported and the helper
 exits. Every spawned vendor exit propagates its original status after cleanup.
-A manual wrapper returns to its outer shell; an app-created terminal finishes.
+Existing outer shells stay available, including the app's normal menu shell.
+Finality means recovery is cleared: a later core start will not resume the agent.
+Direct helper terminals finish. Cleanup failure is reported; a nonzero vendor
+status is retained, otherwise the helper returns an error.
 
 ## Rollback and checks
 

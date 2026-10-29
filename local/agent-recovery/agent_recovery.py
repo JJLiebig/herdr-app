@@ -115,6 +115,15 @@ class Core:
             self.runner.close()
 
 
+def recovery_schema(core):
+    schema = core.call("rpc.discover", {})
+    keep = next((m for m in schema.get("methods", []) if m.get("name") == "terminal.keep"), {})
+    names = {p.get("name") for p in keep.get("params", [])}
+    if not {"recovery", "expected_scope"}.issubset(names):
+        raise RuntimeError("this core does not support managed recovery")
+    return schema.get("components", {}).get("schemas", {})
+
+
 def document_name(terminal):
     return "herdr-main-" + terminal
 
@@ -122,7 +131,7 @@ def document_name(terminal):
 def claim(core, terminal, agent, cwd, session_id=None, current=None, explicit_resume=False):
     if current is None:
         current = core.call("doc.get", {"name": document_name(terminal)})
-    value = dict(invocation=str(uuid.uuid4()), agent=agent, cwd=cwd, session_id=session_id)
+    value = dict(agent=agent, cwd=cwd, session_id=session_id)
     if explicit_resume:
         value["explicit_resume"] = True
     # A competing managed launch wins or loses explicitly; never overwrite its claim.
@@ -145,10 +154,12 @@ def vendor_command(config, session_id=None):
 
 def child(command, cwd, env):
     # Inherit the existing PTY; do not introduce a second terminal or detach the child.
-    process = subprocess.Popen(command, cwd=cwd, env=env)
-    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    # A caught handler is reset by Unix exec; SIG_IGN would be inherited by the child.
+    previous = signal.signal(signal.SIGINT, lambda *_: None)
     try:
-        return process.wait()
+        process = subprocess.Popen(command, cwd=cwd, env=env)
+        result = process.wait()
+        return 128 - result if os.name != "nt" and result < 0 else result
     finally:
         signal.signal(signal.SIGINT, previous)
 
@@ -166,16 +177,9 @@ def run(args):
     terminal = os.environ["HC_TERMINAL_ID"]
     session_id = args.session_id
     with Core() as core:
-        schema = core.call("rpc.discover", {})
-        keep = next((m for m in schema.get("methods", []) if m.get("name") == "terminal.keep"), {})
-        names = {p.get("name") for p in keep.get("params", [])}
-        if not {"recovery", "expected_scope"}.issubset(names):
-            raise RuntimeError("this core does not support managed recovery")
-        schemas = schema.get("components", {}).get("schemas", {})
+        schemas = recovery_schema(core)
         if config["agent"] == "codex" and "resume_session" not in schemas.get("Terminal", {}).get("properties", {}):
             raise RuntimeError("this core does not support native Codex session recovery")
-        if config["agent"] == "codex" and "session_token" not in schemas.get("Recovery", {}).get("properties", {}):
-            raise RuntimeError("this core does not support native session correlation")
         record = core.call("terminal.get", dict(terminal=terminal))
         if record["address"] != terminal or record["state"] != "live":
             raise RuntimeError("terminal is not live")
@@ -206,27 +210,27 @@ def run(args):
         expected = session_id or (command[-1] if config["agent"] == "claude" else None)
         if config["agent"] == "codex" and args.action == "recover" and not explicit_resume:
             expected = None
-        invocation = claim(core, terminal, config["agent"], cwd, expected,
-                           current=current, explicit_resume=explicit_resume)
-        recovery = dict(argv=[sys.executable, str(Path(__file__).resolve()), "recover", "--config", str(config_path)],
-                        cwd=str(Path(__file__).resolve().parent))
-        if config["agent"] == "codex":
-            recovery["session_token"] = invocation["invocation"]
         scope = dict(terminal=terminal, expected_scope=os.environ["HC_SCOPE"])
         if args.action != "recover":
             core.call("terminal.keep", dict(scope, keep=False))
+        claim(core, terminal, config["agent"], cwd, expected,
+              current=current, explicit_resume=explicit_resume)
+        recovery = dict(argv=[sys.executable, str(Path(__file__).resolve()), "recover", "--config", str(config_path)],
+                        cwd=str(Path(__file__).resolve().parent))
         core.call("terminal.keep", dict(scope, keep=True, recovery=recovery))
-    env = dict(os.environ)
-    if config["agent"] == "codex":
-        env["HERDR_MAIN_INVOCATION"] = invocation["invocation"]
-    return child(command, cwd, env)
+    return child(command, cwd, os.environ)
 
 
 def disarm():
-    if os.environ.get("HC_TERMINAL_ID") and os.environ.get("HC_TERMINAL_SOCKET"):
-        with Core() as core:
-            core.call("terminal.keep", dict(terminal=os.environ["HC_TERMINAL_ID"], keep=False,
-                                            expected_scope=os.environ["HC_SCOPE"]))
+    previous = signal.signal(signal.SIGINT, lambda *_: None)
+    try:
+        if os.environ.get("HC_TERMINAL_ID") and os.environ.get("HC_TERMINAL_SOCKET"):
+            with Core() as core:
+                recovery_schema(core)
+                core.call("terminal.keep", dict(terminal=os.environ["HC_TERMINAL_ID"], keep=False,
+                                                expected_scope=os.environ["HC_SCOPE"]))
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 def main():
@@ -239,12 +243,19 @@ def main():
     if args.session_id and args.action != "resume":
         parser.error("--session-id selects a conversation only with resume")
     fallback = False
+    result = None
     try:
         with terminal_lock():
             try:
                 if args.action == "resume" and not args.session_id:
                     raise ValueError("supply an explicit --session-id for resume")
                 result = run(args)
+            except KeyboardInterrupt:
+                try:
+                    disarm()
+                except (OSError, ValueError, RuntimeError, KeyError) as cleanup_error:
+                    raise RuntimeError(f"launch interrupted; recovery could not be cleared: {cleanup_error}") from cleanup_error
+                return 130
             except (OSError, ValueError, RuntimeError, KeyError, TypeError) as error:
                 if isinstance(error, RpcError) and error.kind == "conflict":
                     raise BusyError("the managed launch lost its ownership claim") from error
@@ -263,7 +274,7 @@ def main():
     except (OSError, ValueError, RuntimeError, KeyError, TypeError) as error:
         print(f"Herdr agent recovery failed: {error}", file=sys.stderr)
         # Only open a shell after clearing recovery and releasing the invocation lock.
-        return shell() if fallback else 1
+        return shell() if fallback else (result or 1)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import io
 from pathlib import Path
 import subprocess
 import shutil
+import signal
 import sys
 import tempfile
 import time
@@ -43,8 +44,6 @@ class DocumentCore:
 class LaunchCore(DocumentCore):
     capable = True
     native_capable = True
-    token_capable = True
-    session_token = None
     fail_keep = False
     native_id = None
     kept = False
@@ -60,8 +59,7 @@ class LaunchCore(DocumentCore):
             names = ["terminal", "keep", "recovery", "expected_scope"] if self.capable else ["terminal", "keep"]
             properties = dict(resume_session={}) if self.native_capable else {}
             return dict(methods=[dict(name="terminal.keep", params=[dict(name=n) for n in names])],
-                        components=dict(schemas=dict(Terminal=dict(properties=properties),
-                                                     Recovery=dict(properties=dict(session_token={}) if self.token_capable else {}))))
+                        components=dict(schemas=dict(Terminal=dict(properties=properties))))
         if method == "terminal.get":
             return dict(address="t1", state="live", resume_session=self.native_id)
         if method == "terminal.keep":
@@ -69,9 +67,7 @@ class LaunchCore(DocumentCore):
                 raise RuntimeError("keep was not saved")
             self.kept = params["keep"]
             if not self.kept:
-                self.native_id, self.session_token = None, None
-            else:
-                self.session_token = params["recovery"].get("session_token")
+                self.native_id = None
             return {}
         return super().call(method, params)
 
@@ -135,7 +131,11 @@ let active = { id: 'local', active: true }, platform = 'windows', configured = t
 const agent = { key: 'claude', name: 'Claude', run: ['native-claude'], installed: true };
 const cx = { focus_handle: () => ({focus(){}}), spawn: f => tasks.push(f(cx)), notify(){} };
 let tasks = [];
+let keyHandler, rows = [];
+const widget = () => new Proxy({}, {get: (_, key) => (...args) => { if (key === 'on_key_down') keyHandler = args[0]; return widget(); }});
 const context = { View: class {}, Set, Promise, spaces: () => [active], window: () => ({platform}),
+  theme: () => ({}), div: widget, svg: widget, image: widget, h_flex: widget, v_flex: widget,
+  props: () => ({overlay:'menu'}), closeOverlay() {}, panes: () => [],
   appHome: () => 'C:/Herdr Space', knownAgents: async () => [agent],
   readTextFile: async () => { reads++; return configured ? '{}' : null; }, run: (method, params) => calls.push({method,params}) };
 let source = fs.readFileSync(process.argv[1], 'utf8').replace(/^import .*;\r?\n/gm, '').replace('export default class', 'class');
@@ -143,7 +143,14 @@ vm.runInNewContext(source + '; globalThis.Menu = NewMenu;', context);
 (async () => {
   const menu = new context.Menu(); menu.init({},cx); await Promise.all(tasks);
   menu.startAgent(agent); assert.equal(calls.at(-1).params.argv[0], 'python');
+  menu.row = (id, icon, name, action, hint, enabled = true) => { rows.push({id,action,hint,enabled}); return widget(); };
+  agent.installed = false; menu.render();
+  assert.equal(rows.find(r => r.id === 'claude').enabled, true);
+  keyHandler({key:'1',modifiers:{control:true}}); assert.equal(calls.at(-1).params.argv[0], 'python');
   active = { id: 'remote-now', active: true, machine: 'remote' };
+  rows = []; menu.render(); assert.equal(rows.find(r => r.id === 'claude').enabled, false);
+  const beforeKey = calls.length; keyHandler({key:'1',modifiers:{control:true}}); assert.equal(calls.length,beforeKey);
+  agent.installed = true;
   menu.startAgent(agent); assert.equal(calls.at(-1).params.argv[0], 'native-claude');
   assert.equal(calls.at(-1).params.space, 'remote-now');
   active = { id: 'local', active: true }; platform = 'macos';
@@ -163,12 +170,12 @@ vm.runInNewContext(source + '; globalThis.Menu = NewMenu;', context);
         with tempfile.TemporaryDirectory(prefix="recovery launch ") as folder:
             output = Path(folder) / "launched.json"
             vendor = Path(folder) / "vendor.py"
-            vendor.write_text("import json,os,pathlib,sys; pathlib.Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:])); pathlib.Path(sys.argv[1]+'.token').write_text(os.environ.get('HERDR_MAIN_INVOCATION',''))")
+            vendor.write_text("import json,pathlib,sys; pathlib.Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]))")
             config = Path(folder) / "codex.json"
             config.write_text(json.dumps(dict(agent="codex", argv=[sys.executable, str(vendor), str(output), ""])))
             args = SimpleNamespace(action="new", config=str(config), cwd=folder, session_id=None)
             core = LaunchCore()
-            core.capable, core.native_capable, core.token_capable, core.fail_keep = False, False, False, True
+            core.capable, core.native_capable, core.fail_keep = False, False, True
             with patch.object(helper, "Core", return_value=core), patch.dict(helper.os.environ, HC_TERMINAL_ID="t1", HC_SCOPE="scope"):
                 with patch.object(sys, "argv", ["helper", "new", "--config", str(config), "--session-id", str(uuid.uuid4())]), patch.object(sys, "stderr", io.StringIO()):
                     with self.assertRaises(SystemExit) as invalid:
@@ -179,19 +186,25 @@ vm.runInNewContext(source + '; globalThis.Menu = NewMenu;', context);
                     helper.run(args)
                 self.assertIsNone(core.value)
                 self.assertFalse(output.exists())
+                core.kept = True
+                with patch.object(helper, "terminal_lock", side_effect=nullcontext), \
+                     patch.dict(helper.os.environ, HC_TERMINAL_SOCKET="fixture"), \
+                     patch.object(sys, "argv", ["helper", "new", "--config", str(config)]), \
+                     patch.object(sys, "stderr", io.StringIO()), \
+                     patch.object(helper, "shell", side_effect=AssertionError("unsupported core must not open a fallback shell")):
+                    self.assertEqual(helper.main(), 1)
+                self.assertTrue(core.kept, "unsupported core must not receive a cleanup mutation")
                 core.capable = True
                 with self.assertRaisesRegex(RuntimeError, "native Codex"):
                     helper.run(args)
                 self.assertIsNone(core.value)
                 core.native_capable = True
-                with self.assertRaisesRegex(RuntimeError, "session correlation"):
-                    helper.run(args)
-                self.assertIsNone(core.value)
-                core.token_capable = True
                 with self.assertRaisesRegex(RuntimeError, "keep was not saved"):
                     helper.run(args)
                 self.assertFalse(output.exists())
+                self.assertIsNone(core.value)
                 core.fail_keep = False
+                helper.claim(core, "t1", "codex", folder)
                 sid = str(uuid.uuid4())
                 core.native_id = sid
                 args.action = "recover"
@@ -216,12 +229,14 @@ vm.runInNewContext(source + '; globalThis.Menu = NewMenu;', context);
         with tempfile.TemporaryDirectory(prefix="native recovery ") as folder:
             output = Path(folder) / "argv.json"
             vendor = Path(folder) / "vendor.py"
-            vendor.write_text("import json,os,pathlib,sys; pathlib.Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:])); pathlib.Path(sys.argv[1]+'.token').write_text(os.environ.get('HERDR_MAIN_INVOCATION',''))")
+            vendor.write_text("import json,pathlib,sys; pathlib.Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]))")
             config = Path(folder) / "codex.json"
             config.write_text(json.dumps(dict(agent="codex", argv=[sys.executable, str(vendor), str(output)])))
             args = SimpleNamespace(action="new", config=str(config), cwd=folder, session_id=None)
             core = LaunchCore()
             core.native_id = str(uuid.uuid4())
+            core.kept = True
+            core.before_set = lambda: self.assertFalse(core.kept, "old recipe must be cleared before publishing a new claim")
             original_child = helper.child
             observed = []
             published = str(uuid.uuid4())
@@ -236,16 +251,11 @@ vm.runInNewContext(source + '; globalThis.Menu = NewMenu;', context);
                 self.assertEqual(observed, [None])
                 self.assertEqual(json.loads(output.read_text()), [])
                 self.assertEqual(core.native_id, published)
-                first_token = core.session_token
-                self.assertEqual(Path(str(output) + ".token").read_text(), first_token)
-                self.assertEqual(first_token, core.value["invocation"])
                 explicit = str(uuid.uuid4())
                 args.action, args.session_id = "resume", explicit
                 self.assertEqual(helper.run(args), 0)
                 self.assertIsNone(core.native_id)
                 self.assertTrue(core.value["explicit_resume"])
-                self.assertNotEqual(core.session_token, first_token)
-                self.assertEqual(Path(str(output) + ".token").read_text(), core.session_token)
                 args.action, args.session_id = "recover", None
                 self.assertEqual(helper.run(args), 0)
                 self.assertEqual(json.loads(output.read_text()), ["resume", explicit])
@@ -253,7 +263,6 @@ vm.runInNewContext(source + '; globalThis.Menu = NewMenu;', context);
                 core.native_id = published
                 self.assertEqual(helper.run(args), 0)
                 self.assertEqual(json.loads(output.read_text()), ["resume", published])
-                self.assertEqual(Path(str(output) + ".token").read_text(), core.session_token)
                 self.assertIsNone(core.value["session_id"])
                 self.assertNotIn("explicit_resume", core.value)
                 core.native_id = "invalid-native-id"
@@ -272,13 +281,12 @@ vm.runInNewContext(source + '; globalThis.Menu = NewMenu;', context);
             config.write_text(json.dumps(dict(agent="claude", argv=baseline)))
             args = SimpleNamespace(action="new", config=str(config), cwd=folder, session_id=None)
             core = LaunchCore()
-            core.native_capable, core.token_capable = False, False
+            core.native_capable = False
             original_child = helper.child
             before = []
             def spawn(command, cwd, env):
                 before.append(core.value["session_id"])
                 self.assertTrue(core.kept)
-                self.assertIsNone(core.session_token)
                 return original_child(command, cwd, env)
             with patch.object(helper, "Core", return_value=core), patch.dict(helper.os.environ, HC_TERMINAL_ID="t1", HC_SCOPE="scope"), patch.object(helper, "child", side_effect=spawn):
                 core.fail = True
@@ -317,6 +325,10 @@ vm.runInNewContext(source + '; globalThis.Menu = NewMenu;', context);
                 self.assertEqual(helper.main(), 7)
             self.assertEqual(events, ["disarm"])
             events.clear()
+            with patch.object(helper, "run", side_effect=KeyboardInterrupt):
+                self.assertEqual(helper.main(), 130)
+            self.assertEqual(events, ["disarm"])
+            events.clear()
             with patch.object(helper, "run", side_effect=RuntimeError("missing session")):
                 self.assertEqual(helper.main(), 0)
             self.assertEqual(events, ["disarm", "shell"])
@@ -331,6 +343,13 @@ vm.runInNewContext(source + '; globalThis.Menu = NewMenu;', context);
                  patch.object(sys, "stderr", errors):
                 self.assertEqual(helper.main(), 1)
             self.assertIn("missing session", errors.getvalue())
+            self.assertIn("core unavailable", errors.getvalue())
+            self.assertEqual(events, [])
+            errors = io.StringIO()
+            with patch.object(helper, "run", return_value=7), \
+                 patch.object(helper, "disarm", side_effect=RuntimeError("core unavailable")), \
+                 patch.object(sys, "stderr", errors):
+                self.assertEqual(helper.main(), 7)
             self.assertIn("core unavailable", errors.getvalue())
             self.assertEqual(events, [])
 
@@ -350,6 +369,22 @@ vm.runInNewContext(source + '; globalThis.Menu = NewMenu;', context);
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), "released")
 
+    def test_cleanup_defers_real_interrupt_until_bounded_clear_finishes(self):
+        class InterruptedCore(LaunchCore):
+            def __enter__(self):
+                signal.raise_signal(signal.SIGINT)
+                return self
+        core = InterruptedCore()
+        core.kept = True
+        previous = signal.getsignal(signal.SIGINT)
+        with patch.object(helper, "Core", return_value=core), \
+             patch.object(helper, "terminal_lock", side_effect=nullcontext), \
+             patch.object(helper, "run", return_value=7), \
+             patch.dict(helper.os.environ, HC_TERMINAL_SOCKET="fixture", HC_TERMINAL_ID="t1", HC_SCOPE="scope"), \
+             patch.object(sys, "argv", ["helper", "new", "--config", "unused"]):
+            self.assertEqual(helper.main(), 7)
+        self.assertFalse(core.kept)
+        self.assertEqual(signal.getsignal(signal.SIGINT), previous)
 
 
 
@@ -361,7 +396,7 @@ vm.runInNewContext(source + '; globalThis.Menu = NewMenu;', context);
         newer = helper.claim(core, "t1", "codex", "/new")
         with self.assertRaises(helper.RpcError):
             helper.claim(core, "t1", "codex", "/repo", sid, current=saved)
-        self.assertEqual(core.value["invocation"], newer["invocation"])
+        self.assertEqual(core.value, newer)
         self.assertEqual(core.value["cwd"], "/new")
 
 
@@ -373,6 +408,16 @@ vm.runInNewContext(source + '; globalThis.Menu = NewMenu;', context);
             values = ["", "model name", "path with spaces", 'quoted " value', "unicode café"]
             self.assertEqual(helper.child([sys.executable, str(script), str(output), *values], folder, None), 0)
             self.assertEqual(json.loads(output.read_text()), values)
+            original_spawn = subprocess.Popen
+            def interrupt_at_spawn(*args, **kwargs):
+                process = original_spawn(*args, **kwargs)
+                signal.raise_signal(signal.SIGINT)
+                return process
+            with patch.object(helper.subprocess, "Popen", side_effect=interrupt_at_spawn):
+                self.assertEqual(helper.child([sys.executable, str(script), str(output), *values], folder, None), 0)
+            with patch.object(helper.subprocess, "Popen") as spawn, patch.object(helper.os, "name", "posix"):
+                spawn.return_value.wait.return_value = -2
+                self.assertEqual(helper.child(["vendor"], folder, None), 130)
         command = helper.vendor_command(dict(agent="claude", argv=["claude", "--model", "model name"]))
         self.assertEqual(command[2], "model name")
         self.assertNotIn("--dangerously-skip-permissions", command)

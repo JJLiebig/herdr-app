@@ -31,10 +31,14 @@ export default class NewMenu extends View {
       .on_click(() => { if (enabled) { closeOverlay(props().overlay); action(); } })
       .child(icon).child(div().flex_1().child(name)).child(div().text_size(11).text_color(t.dim).child(hint));
   }
+  isManaged(agent) {
+    const space = spaces().find(s => s.active);
+    return !space?.machine && window()?.platform === "windows" && this.managed.has(agent.key);
+  }
+  available(agent) { return agent.installed || this.isManaged(agent); }
   startAgent(agent) {
     const space = spaces().find(s => s.active);
-    const managed = !space?.machine && window()?.platform === "windows" && this.managed.has(agent.key);
-    const argv = managed
+    const argv = this.isManaged(agent)
       ? ["python", appHome() + "/local/agent-recovery/agent_recovery.py", "new", "--config", appHome() + "/local/agent-recovery/" + agent.key + ".json"]
       : agent.run;
     run("tab.new", { name: agent.name, space: space?.id, argv });
@@ -42,8 +46,8 @@ export default class NewMenu extends View {
   render() {
     const t = theme();
     const space = spaces().find(s => s.active);
-    const installed = this.agents.filter(a => a.installed);
-    const choices = [...installed, ...this.agents.filter(a => !a.installed).slice(0, 2)];
+    const installed = this.agents.filter(a => this.available(a));
+    const choices = [...installed, ...this.agents.filter(a => !this.available(a)).slice(0, 2)];
     const mod = window()?.platform === "macos" ? "⌘" : "Ctrl";
     return v_flex().min_h(0).w_full().h(Math.min(491, 167 + Math.max(1, choices.length) * 31)).bg(t.popover).p(5).text_size(12.8)
       .id("new-menu").track_focus(this.handle)
@@ -60,7 +64,7 @@ export default class NewMenu extends View {
       .child(div().px(9).pt(8).pb(4).text_size(11).text_color(t.dim).child("Start an agent"))
       .child(v_flex().flex_1().min_h(0).overflow_y_scrollbar()
         .children(choices.map((a, i) => this.row(a.key, a.tint ? svg(a.icon).size(14).text_color(t.foreground) : image(a.icon).size(14), a.name,
-          () => this.startAgent(a), a.installed ? (i < 9 ? `${mod} ${i + 1}` : "") : "not installed", a.installed)))
+          () => this.startAgent(a), this.available(a) ? (i < 9 ? `${mod} ${i + 1}` : "") : "not installed", this.available(a))))
         .when(this.agents.length === 0, el => el.child(div().px(9).py(6).text_color(t.dim).child(this.failed ? "Could not load agents" : "Checking installed agents…"))))
       .child(div().h(1).mx(4).my(5).bg(t.border))
       .child(this.row("space", div().w(14).child("+"), "New space", () => run("space.new"), `${mod} N`))
