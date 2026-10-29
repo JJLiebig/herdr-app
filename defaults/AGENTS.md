@@ -657,6 +657,9 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
 - `icon`: a path in the home folder. `tint: true` for a one-color glyph
   (drawn in `color` on a tile, or the text color), false for a picture.
 - `match`: other process names (or agents' `app` names) for the entry.
+- On Windows, the personal fork's local Claude/Codex menu starts use
+  `local/agent-recovery/<agent>.json` when present, with the helper bundle in
+  that folder. Remote spaces and missing configs use the normal `run`.
 - `run`: how to start it (`["cursor-agent"]`), for agents people start
   from a menu: `knownAgents()` lists the entries with one, and whether this
   machine (or another) has them installed.
