@@ -135,7 +135,7 @@ let keyHandler, rows = [];
 const widget = () => new Proxy({}, {get: (_, key) => (...args) => { if (key === 'on_key_down') keyHandler = args[0]; return widget(); }});
 const context = { View: class {}, Set, Promise, spaces: () => [active], window: () => ({platform}),
   theme: () => ({}), div: widget, svg: widget, image: widget, h_flex: widget, v_flex: widget,
-  props: () => ({overlay:'menu'}), closeOverlay() {}, panes: () => [],
+  props: () => ({overlay:'menu'}), closeOverlay() {}, panes: () => [], keys: () => [],
   appHome: () => 'C:/Herdr Space', knownAgents: async () => [agent],
   readTextFile: async () => { reads++; return configured ? '{}' : null; }, run: (method, params) => calls.push({method,params}) };
 let source = fs.readFileSync(process.argv[1], 'utf8').replace(/^import .*;\r?\n/gm, '').replace('export default class', 'class');
@@ -146,10 +146,10 @@ vm.runInNewContext(source + '; globalThis.Menu = NewMenu;', context);
   menu.row = (id, icon, name, action, hint, enabled = true) => { rows.push({id,action,hint,enabled}); return widget(); };
   agent.installed = false; menu.render();
   assert.equal(rows.find(r => r.id === 'claude').enabled, true);
-  keyHandler({key:'1',modifiers:{control:true}}); assert.equal(calls.at(-1).params.argv[0], 'python');
+  keyHandler({key:'1',modifiers:{}}); assert.equal(calls.at(-1).params.argv[0], 'python');
   active = { id: 'remote-now', active: true, machine: 'remote' };
   rows = []; menu.render(); assert.equal(rows.find(r => r.id === 'claude').enabled, false);
-  const beforeKey = calls.length; keyHandler({key:'1',modifiers:{control:true}}); assert.equal(calls.length,beforeKey);
+  const beforeKey = calls.length; keyHandler({key:'1',modifiers:{}}); assert.equal(calls.length,beforeKey);
   agent.installed = true;
   menu.startAgent(agent); assert.equal(calls.at(-1).params.argv[0], 'native-claude');
   assert.equal(calls.at(-1).params.space, 'remote-now');

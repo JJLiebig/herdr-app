@@ -47,6 +47,13 @@ struct Grid {
     core: Arc<Core>,
     channel: Option<u32>,
     cell: Size<Pixels>,
+    /// The window's scale factor, from the last prepaint. Programs see cells,
+    /// images and pixel mouse reports in device pixels, as in Ghostty.
+    scale: f32,
+    /// The cell in device pixels the local screen was sized with.
+    vt_cell: (u32, u32),
+    /// The cell in device pixels the core was last told.
+    told_cell: Option<(u32, u32)>,
     /// Top-left of the cell grid in window coordinates, from the last paint.
     origin: Point<Pixels>,
     buttons_down: usize,
@@ -112,10 +119,17 @@ pub fn next_frame() {
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
 
-fn display_facts() -> serde_json::Value {
+/// `cell`: in device pixels, what the core reports to programs (CSI 14t, 16t).
+fn display_facts(cell: (u32, u32)) -> serde_json::Value {
     let hex = |c: Rgb| format!("#{:02x}{:02x}{:02x}", c.0, c.1, c.2);
     let t = vt::theme();
-    json!({"fg": hex(t.fg), "bg": hex(t.bg), "cursor": hex(t.cursor)})
+    json!({"fg": hex(t.fg), "bg": hex(t.bg), "cursor": hex(t.cursor), "cell": [cell.0, cell.1]})
+}
+
+/// A cell in device pixels.
+fn device_cell(cell: Size<Pixels>, scale: f32) -> (u32, u32) {
+    let px = |v: Pixels| (f32::from(v) * scale).round().max(1.0) as u32;
+    (px(cell.width), px(cell.height))
 }
 
 impl TerminalView {
@@ -138,6 +152,9 @@ impl TerminalView {
                 core: core.clone(),
                 channel: None,
                 cell: size(px(9.0), px(18.0)),
+                scale: 1.0,
+                vt_cell: (9, 18),
+                told_cell: None,
                 origin: Point::default(),
                 buttons_down: 0,
                 images: HashMap::new(),
@@ -184,18 +201,20 @@ impl TerminalView {
     /// take seconds, and the window must keep drawing meanwhile.
     /// `announce_end`: emit Ended if the terminal turns out to be gone.
     fn connect(&mut self, core: Arc<Core>, announce_end: bool, cx: &mut Context<Self>) {
-        let (cols, rows) = {
+        let (cols, rows, cell) = {
             let mut g = self.grid.borrow_mut();
             let (cols, rows) = (g.vt.cols, g.vt.rows);
             // The core repaints the whole screen (and history) on attach.
-            let (cw, ch) = (f32::from(g.cell.width) as u32, f32::from(g.cell.height) as u32);
+            let cell = device_cell(g.cell, g.scale);
             g.vt = Vt::new(cols, rows);
-            g.vt.resize(cols, rows, cw, ch);
+            g.vt.resize(cols, rows, cell.0, cell.1);
+            g.vt_cell = cell;
+            g.told_cell = Some(cell);
             g.core = core.clone();
             g.channel = None;
-            (cols, rows)
+            (cols, rows, cell)
         };
-        let (address, facts) = (self.address.clone(), display_facts());
+        let (address, facts) = (self.address.clone(), display_facts(cell));
         // Replacing the task drops an attach still in flight for an older connection.
         self._reader = Some(cx.spawn(async move |this, cx| {
             let attached = cx.background_executor().spawn(async move { core.attach(&address, cols, rows, facts) }).await;
@@ -425,25 +444,27 @@ impl TerminalView {
         .detach();
     }
 
-    /// Text as a paste; an image alone (a screenshot) for a terminal on another machine.
+    /// Text as a paste; copied files (Finder, a clipboard manager's image) as
+    /// if dropped; an image alone (a screenshot) as Ctrl+V pastes it.
     pub fn paste(&mut self, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
+        let Some(item) = cx.read_from_clipboard() else { return };
+        if let Some(paths) = copied_files(&item) {
+            self.dropped(paths, cx);
+        } else if let Some(text) = item.text() {
             let bytes = self.grid.borrow().vt.paste_bytes(&text);
             self.send(&bytes);
-        } else {
-            self.send_image(cx);
+        } else if item.entries().iter().any(|e| matches!(e, ClipboardEntry::Image(_))) {
+            self.paste_image(cx);
         }
     }
 
-    /// Ctrl+V: the image for a terminal on another machine; otherwise the key goes on.
+    /// Ctrl+V: a remote image, clipboard text on Windows, or the key itself.
     pub fn paste_image(&mut self, cx: &mut Context<Self>) {
         if self.send_image(cx) {
             return;
         }
-        let bytes = Keystroke::parse("ctrl-v").ok().and_then(|keystroke| {
-            let event = KeyDownEvent { keystroke, is_held: false, prefer_character_input: false };
-            key_bytes(&mut self.grid.borrow_mut().vt, &event)
-        });
+        let text = if cfg!(windows) { cx.read_from_clipboard().and_then(|c| c.text()) } else { None };
+        let bytes = paste_image_fallback(&mut self.grid.borrow_mut().vt, text.as_deref());
         if let Some(bytes) = bytes {
             self.send(&bytes);
         }
@@ -486,20 +507,20 @@ impl TerminalView {
     fn scroll(&mut self, ev: &ScrollWheelEvent, _w: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
         let mut g = self.grid.borrow_mut();
-        let lines = match ev.delta {
-            ScrollDelta::Lines(p) => p.y,
-            ScrollDelta::Pixels(p) => p.y / g.cell.height,
+        let rows = g.vt.rows as f32;
+        let steps = match ev.delta {
+            ScrollDelta::Lines(p) if cfg!(target_os = "macos") => macos_wheel_steps(p.y),
+            ScrollDelta::Lines(p) => scroll_steps(&mut self.scrolled, ev.touch_phase, p.y, rows),
+            ScrollDelta::Pixels(p) => scroll_steps(&mut self.scrolled, ev.touch_phase, p.y / g.cell.height, rows),
         };
-        let steps = scroll_steps(&mut self.scrolled, ev.touch_phase, lines, g.vt.rows as f32);
         let n = steps.unsigned_abs() as usize;
         if n == 0 {
             return;
         }
         let up = steps > 0;
         if g.vt.mouse_tracking() {
-            let (x, y) = local(&g, ev.position);
+            let ((x, y), size) = mouse_at(&g, ev.position);
             let button = if up { GHOSTTY_MOUSE_BUTTON_FOUR } else { GHOSTTY_MOUSE_BUTTON_FIVE };
-            let size = grid_size(&g);
             let mut out = Vec::new();
             for _ in 0..n {
                 out.extend(g.vt.encode_mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(button), 0, x, y, size, false));
@@ -545,8 +566,7 @@ impl TerminalView {
             MouseButton::Middle => GHOSTTY_MOUSE_BUTTON_MIDDLE,
             _ => GHOSTTY_MOUSE_BUTTON_UNKNOWN,
         });
-        let (x, y) = local(&g, pos);
-        let size = grid_size(&g);
+        let ((x, y), size) = mouse_at(&g, pos);
         let any = g.buttons_down > 0;
         let bytes = g.vt.encode_mouse(action, b, 0, x, y, size, any);
         if let Some(ch) = g.channel {
@@ -628,6 +648,15 @@ fn quote_paths(paths: impl IntoIterator<Item = String>) -> String {
     out
 }
 
+/// Files on the clipboard: their text is only the bare path, which an agent
+/// reads as words, not as an image to attach.
+fn copied_files(item: &ClipboardItem) -> Option<Vec<std::path::PathBuf>> {
+    item.entries().iter().find_map(|e| match e {
+        ClipboardEntry::ExternalPaths(p) if !p.paths().is_empty() => Some(p.paths().to_vec()),
+        _ => None,
+    })
+}
+
 /// The clipboard's image saved to a file of its own, for its path to be pasted.
 fn image_file(item: &ClipboardItem) -> Option<std::path::PathBuf> {
     let image = item.entries().iter().find_map(|e| match e {
@@ -689,9 +718,23 @@ fn scroll_steps(scrolled: &mut f32, phase: TouchPhase, lines: f32, rows: f32) ->
     }
 }
 
-/// (columns, rows, cell width, cell height) for mouse reports.
-fn grid_size(g: &Grid) -> (u32, u32, f32, f32) {
-    (g.vt.cols as u32, g.vt.rows as u32, f32::from(g.cell.width), f32::from(g.cell.height))
+/// Lines for a macOS mouse wheel event, as Ghostty scrolls them. macOS reports
+/// wheel ticks, a slow notch as a fraction of one (often 0.1), so an event counts
+/// as at least one tick, times Ghostty's default wheel multiplier of 3, with the
+/// fraction dropped.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn macos_wheel_steps(ticks: f32) -> i32 {
+    if ticks == 0.0 {
+        return 0;
+    }
+    (ticks.signum() * ticks.abs().max(1.0) * 3.0).trunc() as i32
+}
+
+/// A pointer position and the grid for mouse reports, in device pixels
+/// (SGR-pixels mode reports pixels, as in Ghostty).
+fn mouse_at(g: &Grid, p: Point<Pixels>) -> ((f32, f32), (u32, u32, f32, f32)) {
+    let ((x, y), s) = (local(g, p), g.scale);
+    ((x * s, y * s), (g.vt.cols as u32, g.vt.rows as u32, f32::from(g.cell.width) * s, f32::from(g.cell.height) * s))
 }
 
 /// An icon's glyph in the bundled symbols font, with its outline's bounds in
@@ -725,6 +768,15 @@ fn icon_glyph(c: char) -> Option<IconGlyph> {
 fn is_icon(text: &str) -> bool {
     let mut chars = text.chars();
     matches!((chars.next(), chars.next()), (Some(c), None) if matches!(c as u32, 0xE000..=0xF8FF | 0xF0000..=0x10FFFD))
+}
+
+fn paste_image_fallback(vt: &mut vt::Vt, text: Option<&str>) -> Option<Vec<u8>> {
+    // Windows console programs expect the terminal to paste clipboard text.
+    if cfg!(windows) && let Some(text) = text {
+        return Some(vt.paste_bytes(text));
+    }
+    let keystroke = Keystroke::parse("ctrl-v").ok()?;
+    key_bytes(vt, &KeyDownEvent { keystroke, is_held: false, prefer_character_input: false })
 }
 
 /// What a key press sends to the program: the key described to libghostty,
@@ -971,7 +1023,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     g.origin = origin;
     let frame = g.vt.frame();
     let placements = g.vt.placements();
-    let mut images: Vec<(i32, Bounds<Pixels>, Arc<RenderImage>)> = Vec::new();
+    let mut images: Vec<(bool, Bounds<Pixels>, Arc<RenderImage>)> = Vec::new();
     let mut keep = std::collections::HashSet::new();
     for p in &placements {
         let key = (p.image, p.generation, p.source);
@@ -983,8 +1035,16 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
             g.images.insert(key, Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(buf)])));
         }
         if let Some(img) = g.images.get(&key) {
-            let pos = origin + point(cell.width * p.col as f32, cell.height * p.row as f32);
-            images.push((p.z, Bounds::new(pos, size(px(p.width as f32), px(p.height as f32))), img.clone()));
+            let [x, y, mut width, mut height] = p.pixel_geometry(f32::from(cell.width), f32::from(cell.height));
+            if p.cell_pixels.is_none() {
+                // Direct placements are in device pixels.
+                width /= scale;
+                height /= scale;
+            }
+            let pos = origin + point(px(x), px(y));
+            // Placeholder runs contain no text and must cover explicit cell backgrounds.
+            let below = p.z < 0 && p.cell_pixels.is_none();
+            images.push((below, Bounds::new(pos, size(px(width), px(height))), img.clone()));
         }
     }
     g.images.retain(|key, image| {
@@ -1005,8 +1065,8 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         Bounds::new(point(x0, y0), size(x1 - x0, y1 - y0))
     };
     let paint_images = |below: bool, window: &mut Window| {
-        for (z, b, img) in &images {
-            if (*z < 0) == below {
+        for (image_below, b, img) in &images {
+            if *image_below == below {
                 let _ = window.paint_image(*b, *b, Corners::default(), img.clone(), 0, false);
             }
         }
@@ -1280,22 +1340,31 @@ impl Render for TerminalView {
                 }
                 if this.selecting && ev.pressed_button == Some(MouseButton::Left) {
                     this.select(Select::Drag, ev.position, cx);
-                } else if this.grid.borrow().buttons_down > 0 {
+                } else {
                     this.mouse(GHOSTTY_MOUSE_ACTION_MOTION, ev.pressed_button, ev.position, ev.modifiers);
                 }
             }))
             .child(
                 canvas(
-                    move |bounds, _window, _cx| {
+                    move |bounds, window, _cx| {
                         let mut g = grid.borrow_mut();
                         g.vt.set_theme(vt::theme());
                         g.cell = cell;
+                        g.scale = window.scale_factor();
+                        let dev = device_cell(cell, g.scale);
+                        // Before the size, so a program woken by it asks for the new cell.
+                        if let Some(chan) = g.channel
+                            && g.told_cell != Some(dev)
+                        {
+                            g.core.facts(chan, &display_facts(dev));
+                            g.told_cell = Some(dev);
+                        }
                         let (px_, py_) = pad();
                         let cols = ((f32::from(bounds.size.width) - 2.0 * px_) / f32::from(cell.width)).floor().max(2.0) as u16;
                         let rows = ((f32::from(bounds.size.height) - 2.0 * py_) / f32::from(cell.height)).floor().max(1.0) as u16;
-                        if (cols, rows) != (g.vt.cols, g.vt.rows) {
-                            let (cw, ch) = (f32::from(cell.width) as u32, f32::from(cell.height) as u32);
-                            g.vt.resize(cols, rows, cw, ch);
+                        if (cols, rows) != (g.vt.cols, g.vt.rows) || dev != g.vt_cell {
+                            g.vt.resize(cols, rows, dev.0, dev.1);
+                            g.vt_cell = dev;
                             if let Some(chan) = g.channel {
                                 g.core.resize(chan, cols, rows);
                                 // Mode 2048 programs wait for this report, not SIGWINCH.
@@ -1442,10 +1511,18 @@ mod tests {
         assert_eq!(super::scroll_steps(&mut s, Started, 0.0, 40.0), 0);
         let total: i32 = (0..12).map(|_| super::scroll_steps(&mut s, Moved, 0.25, 40.0)).sum();
         assert_eq!(total, 3, "twelve quarter lines: not twelve lines");
-        assert_eq!(super::scroll_steps(&mut s, Moved, 3.0, 40.0), 3, "a mouse wheel's notch");
         assert_eq!(super::scroll_steps(&mut s, Started, 0.0, 40.0), 0);
         assert_eq!(super::scroll_steps(&mut s, Moved, -0.5, 40.0), 0, "a new gesture forgets the last one's leftover");
         assert_eq!(super::scroll_steps(&mut s, Moved, -0.6, 40.0), -1);
+    }
+
+    #[test]
+    fn macos_wheel_events_scroll_as_in_ghostty() {
+        use super::macos_wheel_steps as steps;
+        assert_eq!(steps(0.1), 3, "a slow notch");
+        assert_eq!(steps(-0.1), -3);
+        assert_eq!(steps(1.5), 4, "a fast spin's tick, its half line dropped");
+        assert_eq!(steps(0.0), 0);
     }
 
     #[test]
@@ -1455,6 +1532,20 @@ mod tests {
         assert_eq!(q(&["/tmp/shot.png"]), "/tmp/shot.png ");
         assert_eq!(q(&["/tmp/my shot.png", "/a/b"]), "'/tmp/my shot.png' /a/b ");
         assert_eq!(q(&["/tmp/it's.png"]), "'/tmp/it'\\''s.png' ");
+    }
+
+    #[test]
+    fn copied_files_paste_as_files_not_their_bare_path_text() {
+        use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths};
+        let shot = std::path::PathBuf::from("/Users/me/Library/Application Support/clip/file-1.png");
+        let item = ClipboardItem {
+            entries: vec![
+                ClipboardEntry::ExternalPaths(ExternalPaths(smallvec::smallvec![shot.clone()])),
+                ClipboardItem::new_string(shot.to_string_lossy().into_owned()).entries.remove(0),
+            ],
+        };
+        assert_eq!(super::copied_files(&item), Some(vec![shot]));
+        assert_eq!(super::copied_files(&ClipboardItem::new_string("hello".into())), None);
     }
 
     /// A key as the OS hands it over: "shift-;" with what it typed (":"), as
@@ -1472,6 +1563,18 @@ mod tests {
             },
             is_held: false,
             prefer_character_input: false,
+        }
+    }
+
+    #[test]
+    fn ctrl_v_clipboard_text_follows_platform_paste_convention() {
+        let mut vt = Vt::new(20, 3);
+        assert_eq!(super::paste_image_fallback(&mut vt, None).unwrap(), b"\x16");
+        for bracketed in [false, true] {
+            vt.write(if bracketed { b"\x1b[?2004h" } else { b"\x1b[?2004l" });
+            let bytes = super::paste_image_fallback(&mut vt, Some("paste-probe")).unwrap();
+            let expected = if cfg!(windows) { vt.paste_bytes("paste-probe") } else { vec![0x16] };
+            assert_eq!(bytes, expected);
         }
     }
 
@@ -1641,5 +1744,14 @@ mod tests {
             vt.write(output);
             assert_eq!(key_bytes(&mut vt, &press("shift-enter", None)).as_deref(), Some(expected), "output={output:?}");
         }
+    }
+
+    #[test]
+    fn programs_are_told_the_cell_in_device_pixels() {
+        let cell = gpui::size(gpui::px(8.4), gpui::px(21.5));
+        assert_eq!(super::device_cell(cell, 1.0), (8, 22));
+        assert_eq!(super::device_cell(cell, 2.0), (17, 43));
+        assert_eq!(super::device_cell(gpui::size(gpui::px(0.0), gpui::px(0.0)), 2.0), (1, 1));
+        assert_eq!(super::display_facts((17, 43))["cell"], serde_json::json!([17, 43]));
     }
 }
