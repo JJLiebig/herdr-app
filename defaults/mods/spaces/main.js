@@ -151,7 +151,8 @@ export default class Spaces extends View {
     this.unsure.delete(key);
     try {
       // No optional locks: a status that touched the index would wake the watch again.
-      const r = await exec("git", ["--no-optional-locks", "status", "--porcelain=v2", "--branch"], { cwd, on });
+      // Writes nothing under .git (index lock, fsmonitor cookie): watch() would wake on it.
+      const r = await exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v2", "--branch"], { cwd, on });
       if (r.code !== 0) {
         // Only git's own "no" is remembered as no repo; anything else is asked again.
         if (!/not a git repository/i.test(r.stderr)) this.unsure.add(key);

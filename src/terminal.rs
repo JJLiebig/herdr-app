@@ -761,10 +761,9 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
         "space" => Some(" ".to_owned()),
         _ => k.key_char.clone(),
     };
-    // The modifiers that went into the text are used up, as Ghostty reports
-    // them: Shift always (";" -> ":"); Alt/Option when it made a special
-    // character (Option-s -> "\u{df}" on a Mac), not when it didn't (Alt-b on
-    // Linux stays Alt-b).
+    // macOS translates Option into text unless it is configured as Alt.
+    // That text can be ASCII too (Slovenian Shift-Option-2 -> "@").
+    // Other platforms keep Alt shortcuts unless they produced non-ASCII text.
     let mut consumed = mods & GHOSTTY_MODS_SHIFT as GhosttyMods;
     let option_as_alt = {
         #[cfg(target_os = "macos")]
@@ -772,7 +771,7 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
         #[cfg(not(target_os = "macos"))]
         { false }
     };
-    if m.alt && !option_as_alt && text.as_deref().is_some_and(|t| !t.is_ascii()) {
+    if m.alt && !option_as_alt && text.as_deref().is_some_and(|t| !t.is_empty() && (cfg!(target_os = "macos") || !t.is_ascii())) {
         consumed |= GHOSTTY_MODS_ALT as GhosttyMods;
     }
     Some(vt.encode_key(key, mods, consumed, text.as_deref(), unshifted))
@@ -1476,9 +1475,13 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    static OPTION_AS_ALT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     #[cfg(target_os = "macos")]
     fn option_as_alt_encodes_legacy_and_kitty_shortcuts() {
+        let _guard = OPTION_AS_ALT_TEST_LOCK.lock().unwrap();
         gpui_macos::set_option_as_alt(Some(true));
         let mut vt = Vt::new(20, 3);
         for (key, text, bytes) in [("alt-p", "p", b"\x1bp"), ("alt-e", "e", b"\x1be"), ("alt-b", "b", b"\x1bb")] {
@@ -1489,6 +1492,18 @@ mod tests {
         vt.write(b"\x1b[<u");
         gpui_macos::set_option_as_alt(Some(false));
         assert_eq!(key_bytes(&mut vt, &press("alt-p", Some("π"))).unwrap(), "π".as_bytes());
+        for setup in [b"".as_slice(), b"\x1b[>1u"] {
+            let mut vt = Vt::new(20, 3);
+            vt.write(setup);
+            for (key, text) in [
+                ("alt-shift-2", "@"), ("alt-l", "@"), ("alt-5", "["),
+                ("alt-6", "]"), ("alt-7", "|"), ("alt-8", "{"),
+                ("alt-9", "}"), ("alt-shift-7", "\\"), ("alt-n", "~"),
+            ] {
+                assert_eq!(key_bytes(&mut vt, &press(key, Some(text))).unwrap(), text.as_bytes(), "{key}, mode={setup:?}");
+            }
+            assert_eq!(key_bytes(&mut vt, &press("alt-left", None)).unwrap(), b"\x1b[1;3D");
+        }
     }
 
     #[test]
@@ -1523,9 +1538,14 @@ mod tests {
     /// editor.
     #[test]
     fn keys_send_what_ghostty_sends() {
+        #[cfg(target_os = "macos")]
+        let _guard = OPTION_AS_ALT_TEST_LOCK.lock().unwrap();
+        #[cfg(target_os = "macos")]
+        gpui_macos::set_option_as_alt(Some(false));
         // Herdr keeps native Option text on macOS (libghostty's default
         // option-as-alt=false); other platforms prefix an unconsumed Alt.
         const ALT_B: &[u8] = if cfg!(target_os = "macos") { b"b" } else { b"\x1bb" };
+        const KITTY_ALT_B: &[u8] = if cfg!(target_os = "macos") { b"b" } else { b"\x1b[98;3u" };
         const KEYS: &[(&str, Option<&str>, &[u8], &[u8], &[u8])] = &[
             // key, typed, plain, kitty disambiguate (>1u, Neovim), kitty report-all (>9u)
             ("a", Some("a"), b"a", b"a", b"\x1b[97u"),
@@ -1536,7 +1556,7 @@ mod tests {
             ("space", Some(" "), b" ", b" ", b"\x1b[32u"),
             ("ctrl-c", None, b"\x03", b"\x1b[99;5u", b"\x1b[99;5u"),
             ("ctrl-space", None, b"\x00", b"\x1b[32;5u", b"\x1b[32;5u"),
-            ("alt-b", Some("b"), ALT_B, b"\x1b[98;3u", b"\x1b[98;3u"),
+            ("alt-b", Some("b"), ALT_B, KITTY_ALT_B, b"\x1b[98;3u"),
             ("alt-b", Some("∫"), "∫".as_bytes(), "∫".as_bytes(), b"\x1b[98;3u"),
             ("alt-s", Some("\u{df}"), "\u{df}".as_bytes(), "\u{df}".as_bytes(), b"\x1b[115;3u"),
             ("escape", None, b"\x1b", b"\x1b[27u", b"\x1b[27u"),

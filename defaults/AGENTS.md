@@ -303,7 +303,9 @@ layout's look and a block can differ:
 - `themes/<name>.json`: `{ "background", "foreground", "selection",
   "cursor"?, "ansi": [16 colors], "colors"?: {...} }`, all `#rrggbb`; panel
   colors are derived from these, `colors` overrides them. Herdr ships
-  `atom-one-dark`. A theme named like a layout (`themes/win98.json`) is
+  `atom-one-dark`. The original unedited Atom One Dark and Win98 theme files
+  are upgraded to readable terminal colors; edited theme files are kept.
+  A theme named like a layout (`themes/win98.json`) is
   that layout's own: Settings offers it only there.
 - `font` / `font_size`: the terminals' (px at zoom 1); `ui_font`: the mods'
   (their text sizes are their own, in px, and follow zoom). Optional: without
@@ -397,13 +399,16 @@ Narrower than 160px, the sidebar mods draw a compact rail; folding resizes
 `sidebar` to 44 (76 on macOS, room for the traffic lights). On macOS,
 the tabs also leave room for the window buttons when the sidebar is narrower.
 
-### Layouts other people made
+### Layouts and mods other people made
 
-People share layouts at herdr.dev/layouts. Each is a folder laid out like
-this home: `layouts/<name>.json`, the `mods/<name>/` it needs, a
-`RECIPE.md` (the brief to build it from scratch) and a `preview.png`. The
-files are one build of the recipe. Asked to add one
-(`herdr.dev/layouts/<owner>/<name>`, or a folder on GitHub):
+People share layouts at herdr.dev/layouts and mods at herdr.dev/mods. Each
+is a folder laid out like this home: a layout has `layouts/<name>.json` and
+the `mods/<name>/` it needs; a mod is a piece for the person's own window,
+so it has only `mods/<name>/` and maybe a `keys.json` with the keys it
+expects. Both have a `RECIPE.md` (the brief to build it from scratch) and a
+`preview.png`. The files are one build of the recipe. Asked to add one
+(`herdr.dev/layouts/<owner>/<name>`, `herdr.dev/mods/<owner>/<name>`, or a
+folder on GitHub):
 
 1. Read the recipe and every file before writing anything. Before adding,
    tell the person if a mod reaches the network, runs programs (`exec`,
@@ -416,17 +421,20 @@ files are one build of the recipe. Asked to add one
    program, a name clash) or the person asks. If the files don't work on
    this version, or the person wants it different, build it from the
    recipe instead.
-4. `herdr-app check` each mod, then `layout.switch {name}`. The person's
-   own layout stays as it was; `ctrl-shift-l` switches back, and deleting
-   the files removes it.
+4. A mod's `keys.json`: merge it into the person's. Add its sections and
+   keys, and ask before replacing a key they already use.
+5. `herdr-app check` each mod; for a layout, then `layout.switch {name}`.
+   The person's own layout stays as it was; `ctrl-shift-l` switches back,
+   and deleting the files removes it.
 
-To share one: put that folder in a public GitHub repo (one folder per
-layout if there are several), write its `RECIPE.md`, save a screenshot of
-it as `preview.png` and add the repo topic `herdr-layout`. It shows up at
-herdr.dev/layouts within the hour.
+To share one: put that folder in a public GitHub repo (one folder each if
+there are several), write its `RECIPE.md`, save a screenshot of it as
+`preview.png` and add the repo topic `herdr-layout` for a layout or
+`herdr-mod` for a mod. It shows up at herdr.dev/layouts or herdr.dev/mods
+within the hour.
 
 A `RECIPE.md` is a brief: another agent with an empty folder builds the
-layout from it. Write it from the real files, in this order:
+layout or mod from it. Write it from the real files, in this order:
 
 1. `# Name`, one paragraph of what the person sees, `![Name](preview.png)`.
 2. **What you see:** the regions top to bottom or left to right, their
@@ -584,7 +592,9 @@ What's about the user, never a look:
 - `appearance`: `"light"` or `"dark"` always; absent, the system's. A layout
   with a light and a dark theme shows the matching one.
 - Updates: an installed app downloads them by itself and offers Restart and
-  What changed. The first start after an app update also updates herdr-core
+  What changed. If the app crashes or is killed with a verified newer update
+  waiting, the next launch installs it before opening a window. The first
+  start after an app update also updates herdr-core
   to the latest release of the same generation, keeping terminals running.
   Settings → Updates keeps app and core actions together;
   its What's new button opens the waiting update's release range, or this
@@ -621,6 +631,13 @@ What's about the user, never a look:
   Alt shortcuts (including Option+E without composition); `"off"` keeps native
   Option input on every layout. Changes apply immediately, including layout
   switches. Linux and Windows are unchanged.
+- `minimum_contrast`: terminal text contrast ratio, `1` (default) leaves
+  program colors unchanged. Set it to `1.6` to enable the previous readability
+  adjustment, or another number from `1` to `21`. Text below that ratio is
+  replaced with near-white or near-black, whichever contrasts more with its
+  background; this is a threshold, not a guaranteed resulting ratio.
+  Box/block, Powerline and sprite glyph colors are never adjusted.
+  Changes apply immediately, including text already on screen.
 - `clipboard_write`: `false` blocks terminal programs from writing the local
   clipboard (default `true`, including remote terminals attached in this window).
   OSC 52 accepts base64 UTF-8 text up to 1 MiB: `c` writes the system clipboard,
@@ -665,7 +682,14 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
     install them on the agent's host. Status stays native OSC 7501.
 - `run`: how to start it (`["cursor-agent"]`), for agents people start
   from a menu: `knownAgents()` lists the entries with one, and whether this
-  machine (or another) has them installed.
+  machine (or another) has them installed. For example, override
+  `"claude": { "run": ["my-claude"] }` or add
+  `"claude-alt": { "name": "Claude (alt)", "icon": "icons/claude.svg", "run": ["my-claude-alt"] }`
+  inside `programs`. Use programs or shell functions, not aliases (the launcher
+  does not expand them). Local checks include functions in shells such as bash
+  and zsh; fish and remote checks find executables only. Installation
+  checks are cached for up to a minute; changing the commands checks again.
+  Invalid JSON is reported in `programs.error` (a valid file has no error).
 - It follows what runs in the terminal now (lazygit, nvim), else what it
   started with.
 
