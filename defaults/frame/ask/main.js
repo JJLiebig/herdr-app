@@ -165,12 +165,14 @@ export default class Ask extends View {
         .when(this.phase !== "ask", (el) => el
           .child(svg("frame/ask/spinner.svg").size(13).flex_none().text_color(t.working).spin(900))
           .child(div().flex_1().min_w(0).truncate().text_color(t.working).child("Your agent is modding Herdr…"))));
+    // Many agents in a short window (or at a big zoom): the rest scroll.
+    const top = r && r.y + H + 6;
     const list = r && this.picking && v_flex()
       .id("ask-agents")
-      .absolute().left(r.x).top(r.y + H + 6).w(240).p(4)
+      .absolute().left(r.x).top(top).w(240).max_h(Math.max(38, this.size.height - top - 16)).overflow_y_scroll().p(4)
       .rounded(8).border_1().border_color(t.border).bg(t.popover).shadow_lg().text_size(12.8)
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-      .children(this.agents.map((a) => h_flex().id(`ask-${a.key}`).h(30).px(8).gap(10).items_center().rounded(6).cursor_pointer()
+      .children(this.agents.map((a) => h_flex().id(`ask-${a.key}`).flex_none().h(30).px(8).gap(10).items_center().rounded(6).cursor_pointer()
         .when(a === this.agent, (el) => el.bg(t.selected)).hover((s) => s.bg(t.hover))
         .on_click((_e, cx) => { this.agent = a; this.picking = false; this.input.focus(); cx.notify(); })
         .child(this.agentIcon(a, 14)).child(div().text_color(t.foreground).child(a.name))));
