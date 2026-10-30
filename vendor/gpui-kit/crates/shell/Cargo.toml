@@ -18,7 +18,7 @@ name = "gpui-shell"
 path = "src/bin/gpui-shell.rs"
 
 [features]
-# HERDR: retained rendering checks for embedded applications.
+# HERDR: retained, description-only checks for embedded applications.
 render-test-support = []
 gpui-fast = ["dep:gpui-fast", "dep:gpui-fast-platform", "gpui-base/gpui-fast", "gpui-fps/gpui-fast"]
 default = ["quickjs"]
