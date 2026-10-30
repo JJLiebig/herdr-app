@@ -11,6 +11,11 @@ notes-check version:
 
 check: test
 
+# Local desktop qualification only; deliberately excluded from CI.
+[windows]
+test-windows-input *args:
+    pwsh -NoProfile -File scripts/test_windows_input.ps1 {{args}}
+
 notices:
     bun scripts/notices.ts
 

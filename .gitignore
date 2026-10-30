@@ -2,3 +2,5 @@
 /dist
 /.brain
 /AGENTS.local.md
+/.local/windows-input/
+/scripts/windows_input/__pycache__/
