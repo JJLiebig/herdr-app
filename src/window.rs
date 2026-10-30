@@ -107,13 +107,15 @@ pub fn shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
 }
 
-fn unix_agent_argv(sh: String, cmd: Vec<String>) -> Vec<String> {
-    let script = if std::path::Path::new(&sh).file_name().and_then(|s| s.to_str()) == Some("fish") {
-        "command $argv[2..]; exec $argv[1] -i"
-    } else {
-        "\"$@\"; exec \"$0\" -i"
+fn unix_agent_argv(sh: String, cmd: Vec<String>, login: bool) -> Vec<String> {
+    let fish = std::path::Path::new(&sh).file_name().and_then(|s| s.to_str()) == Some("fish");
+    let script = match (fish, login) {
+        (true, true) => "command $argv[2..]; exec $argv[1] -li",
+        (true, false) => "command $argv[2..]; exec $argv[1] -i",
+        (false, true) => "\"$@\"; exec \"$0\" -li",
+        (false, false) => "\"$@\"; exec \"$0\" -i",
     };
-    let mut run = vec![sh.clone(), "-ic".into(), script.into(), sh];
+    let mut run = vec![sh.clone(), if login { "-lic" } else { "-ic" }.into(), script.into(), sh];
     run.extend(cmd);
     run
 }
@@ -2126,7 +2128,7 @@ impl AppWindow {
             let id = o.id.clone();
             return self.close_overlay(&id, window, cx);
         }
-        if self.chrome.find(block).is_some() {
+        if self.chrome.find(block).is_some_and(|n| n.terminal().is_some()) {
             self.chrome.remove(block);
             self.sync(window, cx);
         }
@@ -2235,7 +2237,8 @@ impl AppWindow {
                 // PowerShell has no `-ic`: run it, then stay. `&` finds npm's `.cmd` shims too.
                 return vec![sh, "-NoExit".into(), "-Command".into(), crate::programs::powershell_line(&cmd)];
             }
-            unix_agent_argv(sh, cmd)
+            // macOS terminal sessions load login profiles (including Homebrew's PATH).
+            unix_agent_argv(sh, cmd, cfg!(target_os = "macos"))
         })
     }
 
@@ -4530,13 +4533,21 @@ mod tests {
     #[test]
     fn agent_commands_keep_arguments_out_of_shell_source() {
         let cmd = vec!["agent".to_owned(), "a 'quoted' task; $(not-a-command)\nnext line".to_owned(), "".to_owned()];
-        for sh in ["/bin/bash", "/bin/zsh", "/bin/sh", "/bin/dash", "/bin/fish"] {
-            let run = super::unix_agent_argv(sh.into(), cmd.clone());
-            assert_eq!(run[0], sh);
-            assert_eq!(run[1], "-ic");
-            assert_eq!(run[3], sh);
-            assert_eq!(run[4..], cmd);
-            assert_eq!(run[2], if sh.ends_with("/fish") { "command $argv[2..]; exec $argv[1] -i" } else { "\"$@\"; exec \"$0\" -i" });
+        for login in [false, true] {
+            for sh in ["/bin/bash", "/bin/zsh", "/bin/sh", "/bin/dash", "/bin/fish"] {
+                let run = super::unix_agent_argv(sh.into(), cmd.clone(), login);
+                assert_eq!(run[0], sh);
+                assert_eq!(run[1], if login { "-lic" } else { "-ic" });
+                assert_eq!(run[3], sh);
+                assert_eq!(run[4..], cmd);
+                let expected = match (sh.ends_with("/fish"), login) {
+                    (true, true) => "command $argv[2..]; exec $argv[1] -li",
+                    (true, false) => "command $argv[2..]; exec $argv[1] -i",
+                    (false, true) => "\"$@\"; exec \"$0\" -li",
+                    (false, false) => "\"$@\"; exec \"$0\" -i",
+                };
+                assert_eq!(run[2], expected);
+            }
         }
     }
 

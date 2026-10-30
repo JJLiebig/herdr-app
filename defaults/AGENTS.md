@@ -544,6 +544,9 @@ The main ones:
   Shift+right-click is always Herdr's menu). Copy, paste, paste-image and implicit
   right-click targeting follow keyboard focus, including peek and floating terminals;
   with no terminal holding keyboard focus, they use the focused pane or block.
+  Dragging a text selection past the terminal's top or bottom scrolls while held;
+  releasing stops it. Programs that track the mouse still get their mouse events
+  (hold Shift to select text instead).
   Terminals display Kitty graphics, including Unicode placeholder images used by
   programs such as yazi; partial images and scrolling follow the placeholder cells.
 - Agents: `agent.next`, `agent.prev`, `agent.focus {terminal}`.
@@ -703,7 +706,9 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   `"claude": { "run": ["my-claude"] }` or add
   `"claude-alt": { "name": "Claude (alt)", "icon": "icons/claude.svg", "run": ["my-claude-alt"] }`
   inside `programs`. Use programs or shell functions, not aliases (the launcher
-  does not expand them). Local checks include functions in shells such as bash
+  does not expand them). On macOS the menu launcher loads login profiles before
+  running the agent and leaves an interactive login shell when it ends.
+  Linux keeps interactive non-login shells. Local checks include functions in shells such as bash
   and zsh; fish and remote checks find executables only. Installation
   checks are cached for up to a minute; changing the commands checks again.
   Invalid JSON is reported in `programs.error` (a valid file has no error).

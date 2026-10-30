@@ -83,6 +83,8 @@ pub struct TerminalView {
     pub lost: bool,
     /// A left-button selection drag is in progress.
     selecting: bool,
+    selection_pointer: Point<Pixels>,
+    selection_scroll: Option<Task<()>>,
     /// The terminal's folder, for links to relative paths.
     pub cwd: Option<PathBuf>,
     /// The link under the pointer while the link modifier is held.
@@ -142,6 +144,8 @@ impl TerminalView {
             ended: None,
             lost: false,
             selecting: false,
+            selection_pointer: Point::default(),
+            selection_scroll: None,
             cwd: None,
             link: None,
             link_click: false,
@@ -603,6 +607,47 @@ impl TerminalView {
         Some((target, hit.spans))
     }
 
+    fn start_selection(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        self.selecting = true;
+        self.selection_pointer = pos;
+        self.select(Select::Press, pos, cx);
+        self.selection_scroll = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(50)).await;
+                let keep = this.update(cx, |this, cx| {
+                    if !this.selecting { return false; }
+                    if this.shown_in.get() != FRAME.load(Ordering::Relaxed) {
+                        this.finish_selection(None, cx);
+                        return false;
+                    }
+                    let mut g = this.grid.borrow_mut();
+                    let y = f32::from(this.selection_pointer.y - g.origin.y);
+                    let lines = selection_scroll_lines(y, f32::from(g.cell.height), g.vt.rows);
+                    if lines != 0 {
+                        g.vt.scroll_viewport(lines);
+                        drop(g);
+                        this.select(Select::Drag, this.selection_pointer, cx);
+                    }
+                    true
+                }).unwrap_or(false);
+                if !keep { break; }
+            }
+        }));
+    }
+
+    fn finish_selection(&mut self, pos: Option<Point<Pixels>>, cx: &mut Context<Self>) {
+        self.selecting = false;
+        let mut g = self.grid.borrow_mut();
+        g.buttons_down = g.buttons_down.saturating_sub(1);
+        if let Some(pos) = pos {
+            drop(g);
+            self.select(Select::Release, pos, cx);
+        } else {
+            g.vt.clear_selection();
+            cx.notify();
+        }
+    }
+
     /// Selecting with the mouse (when the program doesn't take it).
     fn select(&mut self, step: Select, pos: Point<Pixels>, cx: &mut Context<Self>) {
         let mut g = self.grid.borrow_mut();
@@ -618,6 +663,12 @@ impl TerminalView {
         }
         cx.notify();
     }
+}
+
+fn selection_scroll_lines(y: f32, cell_height: f32, rows: u16) -> isize {
+    let height = cell_height * rows as f32;
+    let outside = if y < 0.0 { y } else if y >= height { y - height + 1.0 } else { return 0 };
+    (outside / cell_height).abs().ceil().clamp(1.0, 5.0) as isize * if outside < 0.0 { -1 } else { 1 }
 }
 
 /// A title as it's shown: an agent's spinner in front of it (`\u{2733} Fix the
@@ -1256,6 +1307,7 @@ impl Render for TerminalView {
         self.grid.borrow_mut().link_spans = spans.unwrap_or_default();
         let grid = self.grid.clone();
         let grid_paint = self.grid.clone();
+        let selection_view = cx.entity().downgrade();
         let (input_focus, input_view) = (self.focus.clone(), cx.entity());
         let ended = self.ended.clone().or_else(|| self.lost.then(|| "reconnecting to core…".to_owned()));
 
@@ -1299,8 +1351,7 @@ impl Render for TerminalView {
                     return;
                 }
                 if !this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers) {
-                    this.selecting = true;
-                    this.select(Select::Press, ev.position, cx);
+                    this.start_selection(ev.position, cx);
                 }
             }))
             // Right-click is Herdr's menu, even when the program tracks the mouse
@@ -1324,12 +1375,9 @@ impl Render for TerminalView {
                     this.paste(cx);
                 }
             }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, ev: &MouseUpEvent, _, cx| {
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, ev: &MouseUpEvent, _, _| {
                 if std::mem::take(&mut this.link_click) {
                     return;
-                }
-                if std::mem::take(&mut this.selecting) {
-                    this.select(Select::Release, ev.position, cx);
                 }
                 this.mouse(GHOSTTY_MOUSE_ACTION_RELEASE, Some(ev.button), ev.position, ev.modifiers);
             }))
@@ -1338,9 +1386,7 @@ impl Render for TerminalView {
                 if link_mods(&ev.modifiers) || this.link.is_some() {
                     cx.notify();
                 }
-                if this.selecting && ev.pressed_button == Some(MouseButton::Left) {
-                    this.select(Select::Drag, ev.position, cx);
-                } else {
+                if !this.selecting {
                     this.mouse(GHOSTTY_MOUSE_ACTION_MOTION, ev.pressed_button, ev.position, ev.modifiers);
                 }
             }))
@@ -1375,6 +1421,33 @@ impl Render for TerminalView {
                     },
                     move |bounds, _, window, cx| {
                         paint_grid(bounds, &grid_paint, focused, window, cx);
+                        let view = selection_view.clone();
+                        window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Capture {
+                                let _ = view.update(cx, |this, cx| {
+                                    if this.selecting {
+                                        this.selection_pointer = ev.position;
+                                        if ev.pressed_button == Some(MouseButton::Left) {
+                                            this.select(Select::Drag, ev.position, cx);
+                                        } else {
+                                            this.selection_scroll = None;
+                                            this.finish_selection(Some(ev.position), cx);
+                                        }
+                                    }
+                                });
+                            }
+                        });
+                        window.on_mouse_event(move |ev: &MouseUpEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Capture && ev.button == MouseButton::Left {
+                                let _ = selection_view.update(cx, |this, cx| {
+                                    if this.selecting {
+                                        this.selection_scroll = None;
+                                        this.finish_selection(Some(ev.position), cx);
+                                        cx.stop_propagation();
+                                    }
+                                });
+                            }
+                        });
                         // While focused, the OS input methods (Pinyin, Japanese,
                         // dead keys) type into this terminal.
                         if focused {
@@ -1410,6 +1483,19 @@ impl Focusable for TerminalView {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn selection_autoscroll_only_runs_outside_the_grid_and_caps_speed() {
+        use super::selection_scroll_lines as lines;
+        assert_eq!(lines(0.0, 20.0, 40), 0);
+        assert_eq!(lines(799.0, 20.0, 40), 0);
+        assert_eq!(lines(-1.0, 20.0, 40), -1);
+        assert_eq!(lines(800.0, 20.0, 40), 1);
+        assert_eq!(lines(-41.0, 20.0, 40), -3);
+        assert_eq!(lines(841.0, 20.0, 40), 3);
+        assert_eq!(lines(-10_000.0, 20.0, 40), -5);
+        assert_eq!(lines(10_000.0, 20.0, 40), 5);
+    }
+
     struct Empty;
     impl gpui::Render for Empty {
         fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
