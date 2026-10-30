@@ -1704,7 +1704,7 @@ mod tests {
                 let mut vt = Vt::new(20, 3);
                 if win32 { vt.write(b"\x1b[?9001h"); }
                 vt.write(format!("\x1b[>{flags}u").as_bytes());
-                let escape = if flags != 0 {
+                let escape: &[u8] = if flags != 0 {
                     b"\x1b[27u".as_slice()
                 } else if win32 {
                     b"\x1b[27;1;27;1;0;1_\x1b[27;1;27;0;0;1_"
