@@ -490,6 +490,7 @@ the build doesn't do.
   dead keys compose accents through native text input; Option keeps its
   keyboard-layout characters rather than acting as Alt.
 - Terminal keys honor the program's negotiated Kitty mode, including on Windows.
+- Windows terminal Escape stays separate from the following key.
 
 ## Commands
 
