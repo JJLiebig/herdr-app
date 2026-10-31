@@ -52,11 +52,11 @@ struct Grid {
     scale: f32,
     /// The cell in device pixels the local screen was sized with.
     vt_cell: (u32, u32),
-    /// The cell in device pixels the core was last told.
-    told_cell: Option<(u32, u32)>,
+    /// The colors and device-pixel cell size the core was last told.
+    told_display: Option<DisplayFacts>,
     /// Top-left of the cell grid in window coordinates, from the last paint.
     origin: Point<Pixels>,
-    buttons_down: usize,
+    buttons_down: Vec<MouseButton>,
     /// Kitty images uploaded for drawing, by (image, generation, source rect).
     images: HashMap<(u32, u64, [u32; 4]), Arc<RenderImage>>,
     /// Where the pointer is over the pane.
@@ -89,12 +89,8 @@ pub struct TerminalView {
     pub cwd: Option<PathBuf>,
     /// The link under the pointer while the link modifier is held.
     link: Option<LinkTarget>,
-    /// The press opened a link: its release isn't the program's.
-    link_click: bool,
     /// Right-clicks go to the program when it takes the mouse (Shift: the menu).
     pub right_click_to_program: bool,
-    /// The program got the right press: it gets the release too.
-    right_to_program: bool,
     grid: Rc<RefCell<Grid>>,
     focus: FocusHandle,
     was_focused: bool,
@@ -121,17 +117,57 @@ pub fn next_frame() {
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
 
-/// `cell`: in device pixels, what the core reports to programs (CSI 14t, 16t).
-fn display_facts(cell: (u32, u32)) -> serde_json::Value {
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct DisplayFacts {
+    fg: Rgb,
+    bg: Rgb,
+    cursor: Rgb,
+    /// In device pixels, what the core reports to programs (CSI 14t, 16t).
+    cell: (u32, u32),
+}
+
+/// Only send changed facts; a theme switch need not change the cell size.
+fn display_update(told: &mut Option<DisplayFacts>, theme: &vt::Theme, cell: (u32, u32)) -> Option<serde_json::Value> {
+    let facts = DisplayFacts { fg: theme.fg, bg: theme.bg, cursor: theme.cursor, cell };
+    if *told == Some(facts) {
+        return None;
+    }
+    *told = Some(facts);
     let hex = |c: Rgb| format!("#{:02x}{:02x}{:02x}", c.0, c.1, c.2);
-    let t = vt::theme();
-    json!({"fg": hex(t.fg), "bg": hex(t.bg), "cursor": hex(t.cursor), "cell": [cell.0, cell.1]})
+    Some(json!({"fg": hex(facts.fg), "bg": hex(facts.bg), "cursor": hex(facts.cursor), "cell": [cell.0, cell.1]}))
+}
+
+impl Grid {
+    fn refresh_theme(&mut self, theme: &vt::Theme, cell: (u32, u32)) {
+        self.vt.set_theme(theme.clone());
+        if let Some(chan) = self.channel
+            && let Some(facts) = display_update(&mut self.told_display, theme, cell)
+        {
+            self.core.facts(chan, &facts);
+        }
+    }
 }
 
 /// A cell in device pixels.
 fn device_cell(cell: Size<Pixels>, scale: f32) -> (u32, u32) {
     let px = |v: Pixels| (f32::from(v) * scale).round().max(1.0) as u32;
     (px(cell.width), px(cell.height))
+}
+
+// Held-button events belong to the pane that received the press.
+fn track_mouse_button(buttons: &mut Vec<MouseButton>, action: GhosttyMouseAction, button: Option<MouseButton>) -> bool {
+    if let Some(button) = button {
+        if action == GHOSTTY_MOUSE_ACTION_PRESS {
+            if !buttons.contains(&button) {
+                buttons.push(button);
+            }
+        } else if !buttons.contains(&button) {
+            return false;
+        } else if action == GHOSTTY_MOUSE_ACTION_RELEASE {
+            buttons.retain(|b| *b != button);
+        }
+    }
+    true
 }
 
 impl TerminalView {
@@ -148,9 +184,7 @@ impl TerminalView {
             selection_scroll: None,
             cwd: None,
             link: None,
-            link_click: false,
             right_click_to_program: false,
-            right_to_program: false,
             grid: Rc::new(RefCell::new(Grid {
                 vt: Vt::new(size_hint.0.max(2), size_hint.1.max(1)),
                 core: core.clone(),
@@ -158,9 +192,9 @@ impl TerminalView {
                 cell: size(px(9.0), px(18.0)),
                 scale: 1.0,
                 vt_cell: (9, 18),
-                told_cell: None,
+                told_display: None,
                 origin: Point::default(),
-                buttons_down: 0,
+                buttons_down: Vec::new(),
                 images: HashMap::new(),
                 hover: None,
                 link_spans: Vec::new(),
@@ -205,7 +239,7 @@ impl TerminalView {
     /// take seconds, and the window must keep drawing meanwhile.
     /// `announce_end`: emit Ended if the terminal turns out to be gone.
     fn connect(&mut self, core: Arc<Core>, announce_end: bool, cx: &mut Context<Self>) {
-        let (cols, rows, cell) = {
+        let (cols, rows, facts) = {
             let mut g = self.grid.borrow_mut();
             let (cols, rows) = (g.vt.cols, g.vt.rows);
             // The core repaints the whole screen (and history) on attach.
@@ -213,12 +247,13 @@ impl TerminalView {
             g.vt = Vt::new(cols, rows);
             g.vt.resize(cols, rows, cell.0, cell.1);
             g.vt_cell = cell;
-            g.told_cell = Some(cell);
+            g.told_display = None;
+            let facts = display_update(&mut g.told_display, &vt::theme(), cell).unwrap();
             g.core = core.clone();
             g.channel = None;
-            (cols, rows, cell)
+            (cols, rows, facts)
         };
-        let (address, facts) = (self.address.clone(), display_facts(cell));
+        let address = self.address.clone();
         // Replacing the task drops an attach still in flight for an older connection.
         self._reader = Some(cx.spawn(async move |this, cx| {
             let attached = cx.background_executor().spawn(async move { core.attach(&address, cols, rows, facts) }).await;
@@ -251,6 +286,9 @@ impl TerminalView {
                 self.lost = false;
                 let mut g = self.grid.borrow_mut();
                 g.channel = Some(attached.channel);
+                // The theme or cell may have changed while the attach was in flight.
+                let cell = device_cell(g.cell, g.scale);
+                g.refresh_theme(&vt::theme(), cell);
                 // The pane may have been laid out while the attach was in flight.
                 let now = (g.vt.cols, g.vt.rows);
                 if now != attached_size {
@@ -282,6 +320,13 @@ impl TerminalView {
                 None
             }
         }
+    }
+
+    /// Attached tabs follow the window's theme even when they are not drawn.
+    pub fn refresh_theme(&self) {
+        let mut g = self.grid.borrow_mut();
+        let cell = device_cell(g.cell, g.scale);
+        g.refresh_theme(&vt::theme(), cell);
     }
 
     /// Its title as shown (see `shown_title`); news only when that changed.
@@ -556,10 +601,8 @@ impl TerminalView {
     /// (shift keeps the mouse for Herdr: selecting, the menu).
     fn mouse(&mut self, action: GhosttyMouseAction, button: Option<MouseButton>, pos: Point<Pixels>, mods: Modifiers) -> bool {
         let mut g = self.grid.borrow_mut();
-        match action {
-            GHOSTTY_MOUSE_ACTION_PRESS => g.buttons_down += 1,
-            GHOSTTY_MOUSE_ACTION_RELEASE => g.buttons_down = g.buttons_down.saturating_sub(1),
-            _ => {}
+        if !track_mouse_button(&mut g.buttons_down, action, button) {
+            return false;
         }
         if !g.vt.mouse_tracking() || mods.shift {
             return false;
@@ -571,7 +614,7 @@ impl TerminalView {
             _ => GHOSTTY_MOUSE_BUTTON_UNKNOWN,
         });
         let ((x, y), size) = mouse_at(&g, pos);
-        let any = g.buttons_down > 0;
+        let any = !g.buttons_down.is_empty();
         let bytes = g.vt.encode_mouse(action, b, 0, x, y, size, any);
         if let Some(ch) = g.channel {
             g.core.input(ch, &bytes);
@@ -638,7 +681,7 @@ impl TerminalView {
     fn finish_selection(&mut self, pos: Option<Point<Pixels>>, cx: &mut Context<Self>) {
         self.selecting = false;
         let mut g = self.grid.borrow_mut();
-        g.buttons_down = g.buttons_down.saturating_sub(1);
+        g.buttons_down.retain(|b| *b != MouseButton::Left);
         if let Some(pos) = pos {
             drop(g);
             self.select(Select::Release, pos, cx);
@@ -1353,7 +1396,6 @@ impl Render for TerminalView {
                         LinkTarget::External(target) => links::open(&target),
                         LinkTarget::Terminal(address) => cx.emit(TerminalEvent::Peek(address)),
                     }
-                    this.link_click = true;
                     return;
                 }
                 if !this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers) {
@@ -1366,14 +1408,9 @@ impl Render for TerminalView {
             .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
                 if this.right_click_to_program && this.takes_mouse(ev.modifiers) {
-                    this.right_to_program = this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers);
+                    this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers);
                 } else {
                     cx.emit(TerminalEvent::ContextMenu(ev.position));
-                }
-            }))
-            .on_mouse_up(MouseButton::Right, cx.listener(|this, ev: &MouseUpEvent, _, _| {
-                if std::mem::take(&mut this.right_to_program) {
-                    this.mouse(GHOSTTY_MOUSE_ACTION_RELEASE, Some(ev.button), ev.position, ev.modifiers);
                 }
             }))
             .on_mouse_down(MouseButton::Middle, cx.listener(|this, ev: &MouseDownEvent, _, cx| {
@@ -1381,36 +1418,24 @@ impl Render for TerminalView {
                     this.paste(cx);
                 }
             }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, ev: &MouseUpEvent, _, _| {
-                if std::mem::take(&mut this.link_click) {
-                    return;
-                }
-                this.mouse(GHOSTTY_MOUSE_ACTION_RELEASE, Some(ev.button), ev.position, ev.modifiers);
-            }))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
                 this.grid.borrow_mut().hover = Some(ev.position);
                 if link_mods(&ev.modifiers) || this.link.is_some() {
                     cx.notify();
                 }
-                if !this.selecting {
-                    this.mouse(GHOSTTY_MOUSE_ACTION_MOTION, ev.pressed_button, ev.position, ev.modifiers);
+                if !this.selecting && ev.pressed_button.is_none() {
+                    this.mouse(GHOSTTY_MOUSE_ACTION_MOTION, None, ev.position, ev.modifiers);
                 }
             }))
             .child(
                 canvas(
                     move |bounds, window, _cx| {
                         let mut g = grid.borrow_mut();
-                        g.vt.set_theme(vt::theme());
                         g.cell = cell;
                         g.scale = window.scale_factor();
                         let dev = device_cell(cell, g.scale);
                         // Before the size, so a program woken by it asks for the new cell.
-                        if let Some(chan) = g.channel
-                            && g.told_cell != Some(dev)
-                        {
-                            g.core.facts(chan, &display_facts(dev));
-                            g.told_cell = Some(dev);
-                        }
+                        g.refresh_theme(&vt::theme(), dev);
                         let (px_, py_) = pad();
                         let cols = ((f32::from(bounds.size.width) - 2.0 * px_) / f32::from(cell.width)).floor().max(2.0) as u16;
                         let rows = ((f32::from(bounds.size.height) - 2.0 * py_) / f32::from(cell.height)).floor().max(1.0) as u16;
@@ -1431,6 +1456,9 @@ impl Render for TerminalView {
                         window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
                                 let _ = view.update(cx, |this, cx| {
+                                    if !this.selecting && ev.pressed_button.is_some() && !this.grid.borrow().buttons_down.is_empty() {
+                                        this.mouse(GHOSTTY_MOUSE_ACTION_MOTION, ev.pressed_button, ev.position, ev.modifiers);
+                                    }
                                     if this.selecting {
                                         this.selection_pointer = ev.position;
                                         if ev.pressed_button == Some(MouseButton::Left) {
@@ -1444,9 +1472,12 @@ impl Render for TerminalView {
                             }
                         });
                         window.on_mouse_event(move |ev: &MouseUpEvent, phase, _, cx| {
-                            if phase == DispatchPhase::Capture && ev.button == MouseButton::Left {
+                            if phase == DispatchPhase::Capture {
                                 let _ = selection_view.update(cx, |this, cx| {
-                                    if this.selecting {
+                                    if (!this.selecting || ev.button != MouseButton::Left) && this.grid.borrow().buttons_down.contains(&ev.button) {
+                                        this.mouse(GHOSTTY_MOUSE_ACTION_RELEASE, Some(ev.button), ev.position, ev.modifiers);
+                                    }
+                                    if this.selecting && ev.button == MouseButton::Left {
                                         this.selection_scroll = None;
                                         this.finish_selection(Some(ev.position), cx);
                                         cx.stop_propagation();
@@ -1489,6 +1520,30 @@ impl Focusable for TerminalView {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mouse_buttons_only_follow_the_pane_that_took_each_press() {
+        use super::*;
+        let mut buttons = Vec::new();
+        let left = Some(MouseButton::Left);
+        let right = Some(MouseButton::Right);
+        assert!(track_mouse_button(&mut buttons, GHOSTTY_MOUSE_ACTION_MOTION, None));
+        assert!(!track_mouse_button(&mut buttons, GHOSTTY_MOUSE_ACTION_MOTION, left));
+        assert!(!track_mouse_button(&mut buttons, GHOSTTY_MOUSE_ACTION_RELEASE, left));
+        assert!(track_mouse_button(&mut buttons, GHOSTTY_MOUSE_ACTION_PRESS, left));
+        assert!(track_mouse_button(&mut buttons, GHOSTTY_MOUSE_ACTION_MOTION, left));
+        assert!(!track_mouse_button(&mut buttons, GHOSTTY_MOUSE_ACTION_RELEASE, right));
+        assert_eq!(buttons, vec![MouseButton::Left]);
+        assert!(track_mouse_button(&mut buttons, GHOSTTY_MOUSE_ACTION_PRESS, right));
+        assert!(track_mouse_button(&mut buttons, GHOSTTY_MOUSE_ACTION_RELEASE, right));
+        assert_eq!(buttons, vec![MouseButton::Left]);
+        assert!(!track_mouse_button(&mut buttons, GHOSTTY_MOUSE_ACTION_MOTION, right));
+        assert!(track_mouse_button(&mut buttons, GHOSTTY_MOUSE_ACTION_RELEASE, left));
+        assert!(buttons.is_empty());
+        assert!(!track_mouse_button(&mut buttons, GHOSTTY_MOUSE_ACTION_MOTION, left));
+        assert!(!track_mouse_button(&mut buttons, GHOSTTY_MOUSE_ACTION_RELEASE, left));
+        assert!(track_mouse_button(&mut buttons, GHOSTTY_MOUSE_ACTION_MOTION, None));
+    }
+
     #[test]
     fn selection_autoscroll_only_runs_outside_the_grid_and_caps_speed() {
         use super::selection_scroll_lines as lines;
@@ -1652,6 +1707,8 @@ mod tests {
                 modifiers: Modifiers { control: has("ctrl"), alt: has("alt"), shift: has("shift"), platform: has("cmd"), function: false },
                 key: key.into(),
                 key_char: typed.map(str::to_owned),
+                #[cfg(target_os = "macos")]
+                unshifted_key: None,
             },
             is_held: false,
             prefer_character_input: false,
@@ -1884,6 +1941,34 @@ mod tests {
         assert_eq!(super::device_cell(cell, 1.0), (8, 22));
         assert_eq!(super::device_cell(cell, 2.0), (17, 43));
         assert_eq!(super::device_cell(gpui::size(gpui::px(0.0), gpui::px(0.0)), 2.0), (1, 1));
-        assert_eq!(super::display_facts((17, 43))["cell"], serde_json::json!([17, 43]));
+        assert_eq!(super::display_update(&mut None, &crate::vt::theme(), (17, 43)).unwrap()["cell"], serde_json::json!([17, 43]));
+    }
+
+    #[test]
+    fn theme_changes_update_core_facts_without_resizing() {
+        use crate::vt::{theme, Rgb};
+        let mut theme = theme();
+        let cell = (9, 18);
+        let mut told = None;
+        let first = super::display_update(&mut told, &theme, cell).unwrap();
+        assert_eq!(first["cell"], serde_json::json!([9, 18]));
+        assert!(super::display_update(&mut told, &theme, cell).is_none());
+
+        for background in [Rgb(255, 255, 255), Rgb(23, 25, 29)] {
+            theme.bg = background;
+            let update = super::display_update(&mut told, &theme, cell)
+                .expect("a theme-only change must reach the core");
+            assert_eq!(update["bg"], format!("#{:02x}{:02x}{:02x}", background.0, background.1, background.2));
+            assert_eq!(update["cell"], first["cell"]);
+            assert!(super::display_update(&mut told, &theme, cell).is_none());
+        }
+
+        theme.fg = Rgb(1, 2, 3);
+        assert_eq!(super::display_update(&mut told, &theme, cell).unwrap()["fg"], "#010203");
+        theme.cursor = Rgb(4, 5, 6);
+        assert_eq!(super::display_update(&mut told, &theme, cell).unwrap()["cursor"], "#040506");
+        assert_eq!(super::display_update(&mut told, &theme, (17, 43)).unwrap()["cell"], serde_json::json!([17, 43]));
+        theme.selection_bg = Rgb(7, 8, 9);
+        assert!(super::display_update(&mut told, &theme, (17, 43)).is_none(), "local selection colors are not core display facts");
     }
 }

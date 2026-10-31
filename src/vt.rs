@@ -1643,6 +1643,14 @@ mod tests {
     }
 
     #[test]
+    fn button_motion_needs_the_views_press_ownership_gate() {
+        let mut vt = Vt::new(80, 2);
+        vt.write(b"\x1b[?1002h\x1b[?1006h");
+        // Ghostty trusts the event's button even if this pane never saw a press.
+        assert_eq!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, Some(GHOSTTY_MOUSE_BUTTON_LEFT), 0, 35.0, 5.0, (80, 2, 10.0, 20.0), false), b"\x1b[<32;4;1M");
+    }
+
+    #[test]
     fn dragging_selects_and_copies_text() {
         let mut vt = Vt::new(20, 3);
         vt.write(b"hello world\r\nsecond");

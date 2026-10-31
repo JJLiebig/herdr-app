@@ -489,6 +489,9 @@ the build doesn't do.
 - Windows AltGr and dead-key compositions type text in terminals. macOS
   dead keys compose accents through native text input; Option keeps its
   keyboard-layout characters rather than acting as Alt.
+- On macOS, shifted punctuation shortcuts accept both spellings from the
+  current layout: `cmd-shift-]` and `cmd-}` match the same US-layout keypress.
+  Existing `keys.json` files don't need to change.
 - Terminal keys honor the program's negotiated Kitty mode, including on Windows.
 - Windows terminal Escape stays separate from the following key.
 
@@ -547,7 +550,8 @@ The main ones:
   with no terminal holding keyboard focus, they use the focused pane or block.
   Dragging a text selection past the terminal's top or bottom scrolls while held;
   releasing stops it. Programs that track the mouse still get their mouse events
-  (hold Shift to select text instead).
+  (hold Shift to select text instead). A drag stays with the terminal where it
+  started, including its release outside the pane; other panes don't receive it.
   Terminals display Kitty graphics, including Unicode placeholder images used by
   programs such as yazi; partial images and scrolling follow the placeholder cells.
 - Agents: `agent.next`, `agent.prev`, `agent.focus {terminal}`.
