@@ -633,12 +633,17 @@ impl TerminalView {
         let (x, y) = local(&g, pos);
         let (col, row) = (x / f32::from(g.cell.width), y / f32::from(g.cell.height));
         let mut target = None;
-        let hit = g.vt.link_at(col as u16, row as u16, |text, at| {
+        let hit = g.vt.link_at(col as u16, row as u16, |text, at, joined| {
+            // In lines joined back together only a file that exists proves the join right.
             if let Some(range) = links::find(text, at)
                 && let Some(link) = links::resolve(&text[range.clone()], self.cwd.as_deref())
+                && (!joined || matches!(link, links::Target::File(_)))
             {
                 target = Some(LinkTarget::External(link));
                 return Some(range);
+            }
+            if joined {
+                return None;
             }
             let range = links::word(text, at)?;
             let address = crate::mods::terminal_address(&text[range.clone()], &self.address)?;
@@ -905,6 +910,12 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
     }
     if m.alt {
         mods |= GHOSTTY_MODS_ALT as GhosttyMods;
+        #[cfg(target_os = "macos")]
+        if k.option_side == Some(gpui::OptionSide::Right)
+            || (k.option_side == Some(gpui::OptionSide::Both) && gpui_macos::option_as_alt() == gpui_macos::OptionAsAlt::Right)
+        {
+            mods |= GHOSTTY_MODS_ALT_SIDE as GhosttyMods;
+        }
     }
     if m.platform {
         mods |= GHOSTTY_MODS_SUPER as GhosttyMods;
@@ -919,7 +930,7 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
     let mut consumed = mods & GHOSTTY_MODS_SHIFT as GhosttyMods;
     let option_as_alt = {
         #[cfg(target_os = "macos")]
-        { gpui_macos::option_as_alt() }
+        { gpui_macos::option_as_alt().uses_alt(k.option_side) }
         #[cfg(not(target_os = "macos"))]
         { false }
     };
@@ -1709,6 +1720,8 @@ mod tests {
                 key_char: typed.map(str::to_owned),
                 #[cfg(target_os = "macos")]
                 unshifted_key: None,
+                #[cfg(target_os = "macos")]
+                option_side: None,
             },
             is_held: false,
             prefer_character_input: false,
@@ -1734,7 +1747,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn option_as_alt_encodes_legacy_and_kitty_shortcuts() {
         let _guard = OPTION_AS_ALT_TEST_LOCK.lock().unwrap();
-        gpui_macos::set_option_as_alt(Some(true));
+        gpui_macos::set_option_as_alt(Some(gpui_macos::OptionAsAlt::Both));
         let mut vt = Vt::new(20, 3);
         for (key, text, bytes) in [("alt-p", "p", b"\x1bp"), ("alt-e", "e", b"\x1be"), ("alt-b", "b", b"\x1bb")] {
             assert_eq!(key_bytes(&mut vt, &press(key, Some(text))).unwrap(), bytes);
@@ -1742,7 +1755,7 @@ mod tests {
         vt.write(b"\x1b[>1u");
         assert_eq!(key_bytes(&mut vt, &press("alt-e", Some("e"))).unwrap(), b"\x1b[101;3u");
         vt.write(b"\x1b[<u");
-        gpui_macos::set_option_as_alt(Some(false));
+        gpui_macos::set_option_as_alt(Some(gpui_macos::OptionAsAlt::None));
         assert_eq!(key_bytes(&mut vt, &press("alt-p", Some("π"))).unwrap(), "π".as_bytes());
         for setup in [b"".as_slice(), b"\x1b[>1u"] {
             let mut vt = Vt::new(20, 3);
@@ -1756,6 +1769,40 @@ mod tests {
             }
             assert_eq!(key_bytes(&mut vt, &press("alt-left", None)).unwrap(), b"\x1b[1;3D");
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn option_sides_encode_shortcuts_and_native_text() {
+        use gpui::OptionSide;
+        use gpui_macos::OptionAsAlt;
+        let _guard = OPTION_AS_ALT_TEST_LOCK.lock().unwrap();
+        for setting in [OptionAsAlt::Left, OptionAsAlt::Right] {
+            gpui_macos::set_option_as_alt(Some(setting));
+            for side in [OptionSide::Left, OptionSide::Right, OptionSide::Both] {
+                let as_alt = side == OptionSide::Both || matches!((setting, side), (OptionAsAlt::Left, OptionSide::Left) | (OptionAsAlt::Right, OptionSide::Right));
+                for kitty in [false, true] {
+                    let mut vt = Vt::new(20, 3);
+                    if kitty { vt.write(b"\x1b[>1u"); }
+                    for native in ["π", "@"] {
+                        let mut event = press("alt-p", Some(if as_alt { "p" } else { native }));
+                        event.keystroke.option_side = Some(side);
+                        let expected = if as_alt {
+                            if kitty { b"\x1b[112;3u".as_slice() } else { b"\x1bp".as_slice() }
+                        } else { native.as_bytes() };
+                        assert_eq!(key_bytes(&mut vt, &event).unwrap(), expected);
+                        // Shortcut-prefix replay must retain the original Option side.
+                        let mut replay = event.clone();
+                        replay.prefer_character_input = true;
+                        assert_eq!(key_bytes(&mut vt, &replay).unwrap(), expected);
+                    }
+                    let mut arrow = press("alt-left", None);
+                    arrow.keystroke.option_side = Some(side);
+                    assert_eq!(key_bytes(&mut vt, &arrow).unwrap(), b"\x1b[1;3D");
+                }
+            }
+        }
+        gpui_macos::set_option_as_alt(Some(OptionAsAlt::None));
     }
 
     #[test]
@@ -1793,7 +1840,7 @@ mod tests {
         #[cfg(target_os = "macos")]
         let _guard = OPTION_AS_ALT_TEST_LOCK.lock().unwrap();
         #[cfg(target_os = "macos")]
-        gpui_macos::set_option_as_alt(Some(false));
+        gpui_macos::set_option_as_alt(Some(gpui_macos::OptionAsAlt::None));
         // Herdr keeps native Option text on macOS (libghostty's default
         // option-as-alt=false); other platforms prefix an unconsumed Alt.
         const ALT_B: &[u8] = if cfg!(target_os = "macos") { b"b" } else { b"\x1bb" };

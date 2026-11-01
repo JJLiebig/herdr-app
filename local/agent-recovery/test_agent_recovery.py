@@ -136,7 +136,7 @@ const widget = () => new Proxy({}, {get: (_, key) => (...args) => { if (key === 
 const context = { View: class {}, Set, Promise, spaces: () => [active], window: () => ({platform}),
   theme: () => ({}), div: widget, svg: widget, image: widget, h_flex: widget, v_flex: widget,
   props: () => ({overlay:'menu'}), closeOverlay() {}, panes: () => [], keys: () => [],
-  appHome: () => 'C:/Herdr Space', knownAgents: async () => [agent],
+  appHome: () => 'C:/Herdr Space', knownAgents: async () => [agent], shared: () => ({}), setShared() {},
   readTextFile: async () => { reads++; return configured ? '{}' : null; }, run: (method, params) => calls.push({method,params}) };
 let source = fs.readFileSync(process.argv[1], 'utf8').replace(/^import .*;\r?\n/gm, '').replace('export default class', 'class');
 vm.runInNewContext(source + '; globalThis.Menu = NewMenu;', context);
