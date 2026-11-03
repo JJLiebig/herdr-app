@@ -385,6 +385,28 @@ fn check_materializes_retained_elements_in_a_rendered_view(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn rebuilt_machine_offers_connect_only_for_identity_mismatch(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (state, why, offered) in [
+        ("unreachable", "a different core answers there (\"new-id\")", true),
+        ("unreachable", "connection refused", false),
+        ("unreachable", "a different core answers there", false),
+        ("connected", "a different core answers there (\"new-id\")", false),
+    ] {
+        let setup = format!(
+            "this.machines = [{{name:'cloud', state:{}, why:{}, target:'host'}}]; this.folded.add('cloud');",
+            json!(state), json!(why)
+        );
+        let tree = describe(cx, &staged, "mods/spaces", false, props(), updates("current", "current"), Some(&setup)).unwrap();
+        assert_eq!(tree.contains("machine-connect-cloud"), offered, "{state}/{why}: {tree}");
+        assert_eq!(tree.contains("rebuilt ·"), offered, "{tree}");
+        assert_eq!(tree.contains("This machine was rebuilt or replaced. Click to connect to the new one."), offered, "{tree}");
+        assert!(!tree.contains("machine-reconnect-"), "reconnect belongs in the machine row: {tree}");
+    }
+}
+
+#[gpui::test]
 fn machine_picker_keeps_long_lists_scrollable(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
@@ -721,7 +743,7 @@ fn mod_images_share_across_keyed_rows_and_retire_after_removal(cx: &mut TestAppC
     assert_eq!(requests.lock().unwrap().len(), 1, "50 keyed rows share one load");
     let mut loaded = context.update(|window, cx| root.read(cx).0.loaded_images(window, cx));
     assert_eq!(loaded.len(), 1, "50 keyed rows share one decoded image");
-    let first = loaded.pop().unwrap();
+    let mut first = loaded.pop().unwrap();
     context.update(|window, _| assert!(window.has_image_atlas_entry(&first)));
 
     // A cached visible subtree must survive timers without reloading or losing its texture.
@@ -729,6 +751,17 @@ fn mod_images_share_across_keyed_rows_and_retire_after_removal(cx: &mut TestAppC
     draw(context);
     context.update(|window, _| assert!(window.has_image_atlas_entry(&first)));
     assert_eq!(requests.lock().unwrap().len(), 1);
+
+    let gpui::ImageSource::Resource(resource) = gpui::ImageSource::from("https://images.example/first.svg") else { panic!("image resource") };
+    context.update(|_, cx| gpui_shell::invalidate_image_cache(&resource, cx));
+    view.update(context, |view, cx| view.refresh(cx));
+    draw(context);
+    assert_eq!(requests.lock().unwrap().len(), 2, "invalidated images load again");
+    for _ in 0..2 { tick(context); }
+    context.update(|window, _| assert!(!window.has_image_atlas_entry(&first)));
+    let mut loaded = context.update(|window, cx| root.read(cx).0.loaded_images(window, cx));
+    assert_eq!(loaded.len(), 1);
+    first = loaded.pop().unwrap();
 
     state.borrow_mut()["path"] = Value::Null;
     view.update(context, |view, cx| view.refresh(cx));
@@ -738,7 +771,7 @@ fn mod_images_share_across_keyed_rows_and_retire_after_removal(cx: &mut TestAppC
     state.borrow_mut()["mount"] = json!(1);
     view.update(context, |view, cx| view.refresh(cx));
     draw(context);
-    assert_eq!(requests.lock().unwrap().len(), 1, "remounts reuse the loaded image");
+    assert_eq!(requests.lock().unwrap().len(), 2, "remounts reuse the loaded image");
     let loaded = context.update(|window, cx| root.read(cx).0.loaded_images(window, cx));
     assert_eq!(loaded[0].id, first.id);
     drop(loaded);
@@ -755,7 +788,7 @@ fn mod_images_share_across_keyed_rows_and_retire_after_removal(cx: &mut TestAppC
     assert_eq!(loaded.len(), 1);
     let second = loaded.pop().unwrap();
     context.update(|window, _| assert!(window.has_image_atlas_entry(&second)));
-    assert_eq!(requests.lock().unwrap().len(), 2);
+    assert_eq!(requests.lock().unwrap().len(), 3);
 
     state.borrow_mut()["path"] = Value::Null;
     view.update(context, |view, cx| view.refresh(cx));

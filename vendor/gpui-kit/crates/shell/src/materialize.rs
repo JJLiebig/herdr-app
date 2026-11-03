@@ -1439,7 +1439,7 @@ fn materialize_component(
             // accounts for this node's own `text_color`, so an explicit color
             // still wins and an icon in a dark button comes out light.
             warn_unhonoured_a11y(&behavior, "svg", &[]);
-            let path = SharedString::from(path);
+            let path = crate::AppAssets::cache_key(&path);
             // HERDR: `spin`.
             if let Some(ms) = behavior.spin
                 && HOSTED.with(|h| h.get())
