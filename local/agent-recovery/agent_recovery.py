@@ -184,6 +184,46 @@ def recovery_command(config_path):
                 cwd=str(Path(__file__).resolve().parent))
 
 
+def transcript_cwd(path, session_id):
+    # CwdChanged notifications run independently and may arrive out of order.
+    # Read the latest persisted main-session cwd while holding the hook lock.
+    # Scan from the tail: ordinary directory changes need only the last chunk.
+    with Path(path).open("rb") as handle:
+        position = handle.seek(0, os.SEEK_END)
+        pending = b""
+        while position:
+            size = min(position, 65536)
+            position -= size
+            handle.seek(position)
+            lines = (handle.read(size) + pending).split(b"\n")
+            pending = lines.pop(0) if position else b""
+            for line in reversed(lines):
+                try:
+                    row = json.loads(line)
+                except (ValueError, UnicodeDecodeError):
+                    continue  # A concurrent append may leave the final line incomplete.
+                if isinstance(row, dict) and row.get("sessionId") == session_id and isinstance(row.get("cwd"), str):
+                    return row["cwd"]
+    raise ValueError("session transcript has no saved working directory")
+
+
+def directory_cwd(event, session_id):
+    # Claude documents asynchronous transcript writes. Wait briefly for the move
+    # to be saved; never publish the previous directory just because it was last
+    # on disk. This runs only in the asynchronous CwdChanged hook.
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            saved = transcript_cwd(event["transcript_path"], session_id)
+        except (FileNotFoundError, ValueError):
+            saved = None
+        if saved is not None and Path(saved) != Path(event["old_cwd"]):
+            return saved
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.05)
+
+
 def claude_hook(config_path, event):
     if not all(os.environ.get(key) for key in ("HC_TERMINAL_ID", "HC_TERMINAL_SOCKET", "HC_SCOPE")):
         return
@@ -195,7 +235,7 @@ def claude_hook(config_path, event):
     if event.get("agent_id"):
         return
     name = event.get("hook_event_name")
-    if name != "SessionStart" and not (name == "SessionEnd" and event.get("reason") in ("prompt_input_exit", "logout")):
+    if name not in ("SessionStart", "CwdChanged") and not (name == "SessionEnd" and event.get("reason") in ("prompt_input_exit", "logout")):
         return
     session_id = event["session_id"]
     if not isinstance(session_id, str):
@@ -213,19 +253,36 @@ def claude_hook(config_path, event):
         if record["state"] != "live":
             return
         current = core.call("doc.get", dict(name=document_name(terminal)))
-        if name == "SessionStart":
+        pin = current["value"]
+        owns_pin = (pin and pin.get("agent") == "claude" and pin.get("session_id") == session_id
+                    and pin.get("owner_pid") == owner_pid)
+        if name in ("SessionStart", "CwdChanged"):
+            # A directory notification can update its own attended session, never enroll
+            # a delayed old session or re-enable a deliberately cleared recipe.
+            if name == "CwdChanged" and (not owns_pin or not record.get("keep")):
+                return
+            directory = directory_cwd(event, session_id) if name == "CwdChanged" else event["cwd"]
+            if directory is None:
+                return
+            cwd = str(Path(directory).resolve(strict=True))
+            if not Path(cwd).is_dir():
+                raise ValueError("session working directory is unavailable")
+            if name == "CwdChanged" and pin.get("cwd") == cwd:
+                return
             config_path, config = load_config(config_path)
             if config["agent"] != "claude":
                 raise ValueError("Claude hooks require a Claude config")
-            cwd = str(Path(event["cwd"]).resolve(strict=True))
-            if not Path(cwd).is_dir():
-                raise ValueError("session working directory is unavailable")
+            # The transcript retry can yield to an external `hc keep --off`.
+            # Re-read immediately before updating, rather than trusting the old snapshot.
+            if name == "CwdChanged":
+                record = core.call("terminal.get", dict(terminal=terminal))
+                if record["state"] != "live" or not record.get("keep"):
+                    return
             # Core validates HC_SCOPE here; its public terminal record deliberately omits it.
             core.call("terminal.keep", dict(scope, keep=True, recovery=dict(argv=vendor_command(config, session_id), cwd=cwd)))
             claim(core, terminal, "claude", cwd, session_id, current=current, owner_pid=owner_pid)
         else:
-            pin = current["value"]
-            if pin and pin.get("agent") == "claude" and pin.get("session_id") == session_id and pin.get("owner_pid") == owner_pid:
+            if owns_pin:
                 core.call("terminal.keep", dict(scope, keep=False))
 
 

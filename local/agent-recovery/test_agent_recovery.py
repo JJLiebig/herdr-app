@@ -61,7 +61,7 @@ class LaunchCore(DocumentCore):
             return dict(methods=[dict(name="terminal.keep", params=[dict(name=n) for n in names])],
                         components=dict(schemas=dict(Terminal=dict(properties=properties))))
         if method == "terminal.get":
-            return dict(address="t1", state="live", resume_session=self.native_id)
+            return dict(address="t1", state="live", keep=self.kept, resume_session=self.native_id)
         if method == "terminal.keep":
             if self.fail_keep:
                 raise RuntimeError("keep was not saved")
@@ -453,6 +453,86 @@ class ClaudeHookTests(unittest.TestCase):
                 self.assertTrue(core.kept)
                 helper.claude_hook(config, end)
                 self.assertFalse(core.kept)
+
+    def test_directory_changes_follow_only_the_current_attended_owner(self):
+        with tempfile.TemporaryDirectory(prefix="Claude cwd ") as folder:
+            root = Path(folder)
+            moved = root / "moved"
+            moved.mkdir()
+            config = root / "claude.json"
+            config.write_text(json.dumps(dict(agent="claude", argv=["claude", "--model", "opus"])))
+            sid = str(uuid.uuid4())
+            core = LaunchCore()
+            env = dict(HC_TERMINAL_ID="t1", HC_TERMINAL_SOCKET="hook-" + str(uuid.uuid4()), HC_SCOPE="scope",
+                       CLAUDE_CODE_SESSION_ATTENDED="1", CLAUDE_PID="101")
+            start = dict(hook_event_name="SessionStart", session_id=sid, cwd=folder)
+            transcript = root / "session.jsonl"
+            def save_cwd(directory):
+                with transcript.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(dict(sessionId=sid, cwd=str(directory))) + "\n")
+            save_cwd(moved)
+            changed = dict(start, hook_event_name="CwdChanged", cwd=str(moved), old_cwd=folder,
+                           new_cwd=str(moved), transcript_path=str(transcript))
+            with patch.dict(helper.os.environ, env), patch.object(helper, "Core", return_value=core):
+                helper.claude_hook(config, changed)
+                self.assertIsNone(core.value, "directory changes cannot enroll a session")
+                helper.claude_hook(config, start)
+                original = copy.deepcopy(core.value)
+                for changes, payload in [
+                    ({}, dict(changed, session_id=str(uuid.uuid4()))),
+                    (dict(CLAUDE_PID="102"), changed),
+                    (dict(CLAUDE_CODE_SESSION_ATTENDED="0"), changed),
+                    ({}, dict(changed, agent_id="child")),
+                ]:
+                    with patch.dict(helper.os.environ, changes):
+                        helper.claude_hook(config, payload)
+                    self.assertEqual(core.value, original)
+                # Verify both the durable document and the actual core recovery recipe.
+                original_call = core.call
+                recipes = []
+                def call(method, params):
+                    if method == "terminal.keep" and params.get("recovery"):
+                        recipes.append(params["recovery"])
+                    return original_call(method, params)
+                with patch.object(core, "call", side_effect=call):
+                    helper.claude_hook(config, changed)
+                    self.assertEqual(core.value, dict(original, cwd=str(moved.resolve())))
+                    self.assertEqual(recipes, [dict(argv=["claude", "--model", "opus", "--resume", sid], cwd=str(moved.resolve()))])
+                    version = core.version
+                    helper.claude_hook(config, changed)
+                    self.assertEqual(core.version, version)
+                    self.assertEqual(len(recipes), 1, "unchanged cwd must not rewrite recovery")
+                    latest = root / "latest"
+                    latest.mkdir()
+                    delayed = dict(changed, cwd=str(latest), old_cwd=str(moved))
+                    with patch.object(helper.time, "sleep", side_effect=lambda _: save_cwd(latest)):
+                        helper.claude_hook(config, delayed)
+                    self.assertEqual(core.value["cwd"], str(latest.resolve()))
+                    # A newer event finishes first; the older event still carries moved.
+                    helper.claude_hook(config, dict(changed, cwd=str(latest)))
+                    helper.claude_hook(config, changed)
+                    self.assertEqual(core.value["cwd"], str(latest.resolve()))
+                    self.assertEqual(recipes[-1]["cwd"], str(latest.resolve()))
+                    self.assertEqual(len(recipes), 2)
+                    # Returning to a previous cwd is legitimate; a stale event cannot undo it.
+                    save_cwd(moved)
+                    helper.claude_hook(config, dict(changed, cwd=str(latest)))
+                    self.assertEqual(core.value["cwd"], str(moved.resolve()))
+                    version = core.version
+                    with patch.object(helper.time, "monotonic", side_effect=[0, 3]):
+                        helper.claude_hook(config, delayed)
+                    self.assertEqual(core.version, version, "unflushed history must not publish the old cwd")
+                    def disable_during_flush(_):
+                        core.kept = False
+                        save_cwd(latest)
+                    with patch.object(helper.time, "sleep", side_effect=disable_during_flush):
+                        helper.claude_hook(config, delayed)
+                    self.assertFalse(core.kept, "external keep-off during transcript wait must win")
+                    self.assertEqual(core.version, version)
+                helper.claude_hook(config, dict(start, hook_event_name="SessionEnd", reason="prompt_input_exit"))
+                helper.claude_hook(config, dict(changed, cwd=folder))
+                self.assertFalse(core.kept, "delayed directory hooks must not undo deliberate cleanup")
+                self.assertEqual(core.value["cwd"], str(moved.resolve()))
 
     def test_background_headless_subagents_and_non_herdr_calls_do_not_enroll(self):
         event = dict(hook_event_name="SessionStart", session_id=str(uuid.uuid4()), cwd="unused")
