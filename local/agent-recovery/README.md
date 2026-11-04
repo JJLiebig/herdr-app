@@ -25,8 +25,8 @@ configs with direct argument arrays, for example:
 Keep normal vendor model/config/permission arguments; leave conversation selection
 to the managed actions; do not store starting prompts or inline secrets here.
 User settings, plugins, environment and normal native approvals stay in effect.
-Claude's two identity hooks below register plain shell launches too. Status stays
-native OSC 7501; the hooks only register recovery and clear deliberate exits.
+Claude's identity and directory hooks below register plain shell launches too.
+Status stays native OSC 7501; the hooks only register recovery and clear deliberate exits.
 
 ### Claude: plain shell launches
 
@@ -39,6 +39,7 @@ the helper's five-second IPC deadline and connection close.
 {
   "hooks": {
     "SessionStart": [{"hooks": [{"type": "command", "command": "python C:/stable/agent-recovery/agent_recovery.py claude-hook --config C:/stable/claude.json", "timeout": 20}]}],
+    "CwdChanged": [{"hooks": [{"type": "command", "command": "python C:/stable/agent-recovery/agent_recovery.py claude-hook --config C:/stable/claude.json", "timeout": 20, "async": true}]}],
     "SessionEnd": [{"matcher": "prompt_input_exit|logout", "hooks": [{"type": "command", "command": "python C:/stable/agent-recovery/agent_recovery.py claude-hook --config C:/stable/claude.json", "timeout": 20}]}]
   }
 }
@@ -46,7 +47,14 @@ the helper's five-second IPC deadline and connection close.
 
 New attended `claude` launches in Herdr enroll automatically, including launches
 through the menu. `SessionStart` supplies the actual native UUID on startup,
-resume, clear and foreground branch. `CLAUDE_PID` owns cleanup; a delayed exit
+resume, clear and foreground branch. `CwdChanged` updates the saved directory
+for that same session and owner after a main-conversation shell directory change.
+It runs asynchronously, so a stopped core or helper failure cannot delay or reject
+a prompt. It fires only on directory changes, avoiding per-prompt polling and
+unchanged-directory core calls; duplicate notifications do not rewrite recovery.
+This event and its `cwd` input are present in Claude Code 2.1.318 and documented
+in the [hooks reference](https://code.claude.com/docs/en/hooks#cwdchanged).
+`CLAUDE_PID` owns cleanup; a delayed exit
 from a different process cannot clear the current session. Background jobs,
 headless runs and subagents are ignored. `SessionEnd` clears only deliberate
 exit/logout; clear/resume handoffs, signal exits and a stopped core preserve the
@@ -75,8 +83,8 @@ python C:/stable/agent-recovery/agent_recovery.py resume --config C:/stable/code
 ```
 
 Both accept `--cwd <directory>` and otherwise use the shell's current directory.
-Recovery keeps that launcher directory. Codex retains its native saved-directory
-policy and may ask its usual directory question.
+Claude directory hooks subsequently follow its current working directory. Codex
+retains its native saved-directory policy and may ask its usual directory question.
 Recovery uses the core's environment, not later shell/profile changes. Set a
 required native home or PATH on that core (or with `hc run --env NAME=value`);
 use supported explicit vendor arguments for config selection. No environment
@@ -111,7 +119,7 @@ status is retained, otherwise the helper returns an error.
 
 ## Rollback and checks
 
-Remove these two recovery hook commands from Claude's user settings and remove
+Remove these three recovery hook commands from Claude's user settings and remove
 or rename the opt-in configs, then reopen the menu. Run `hc keep <terminal>
 --off`, quit its managed agent, then remove the script. Inert helper documents may
 remain. Other hooks/settings need no changes.

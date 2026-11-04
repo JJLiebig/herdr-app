@@ -195,7 +195,7 @@ def claude_hook(config_path, event):
     if event.get("agent_id"):
         return
     name = event.get("hook_event_name")
-    if name != "SessionStart" and not (name == "SessionEnd" and event.get("reason") in ("prompt_input_exit", "logout")):
+    if name not in ("SessionStart", "CwdChanged") and not (name == "SessionEnd" and event.get("reason") in ("prompt_input_exit", "logout")):
         return
     session_id = event["session_id"]
     if not isinstance(session_id, str):
@@ -213,19 +213,27 @@ def claude_hook(config_path, event):
         if record["state"] != "live":
             return
         current = core.call("doc.get", dict(name=document_name(terminal)))
-        if name == "SessionStart":
-            config_path, config = load_config(config_path)
-            if config["agent"] != "claude":
-                raise ValueError("Claude hooks require a Claude config")
+        pin = current["value"]
+        owns_pin = (pin and pin.get("agent") == "claude" and pin.get("session_id") == session_id
+                    and pin.get("owner_pid") == owner_pid)
+        if name in ("SessionStart", "CwdChanged"):
+            # A directory notification can update its own attended session, never enroll
+            # a delayed old session or re-enable a deliberately cleared recipe.
+            if name == "CwdChanged" and (not owns_pin or not record.get("keep")):
+                return
             cwd = str(Path(event["cwd"]).resolve(strict=True))
             if not Path(cwd).is_dir():
                 raise ValueError("session working directory is unavailable")
+            if name == "CwdChanged" and pin.get("cwd") == cwd:
+                return
+            config_path, config = load_config(config_path)
+            if config["agent"] != "claude":
+                raise ValueError("Claude hooks require a Claude config")
             # Core validates HC_SCOPE here; its public terminal record deliberately omits it.
             core.call("terminal.keep", dict(scope, keep=True, recovery=dict(argv=vendor_command(config, session_id), cwd=cwd)))
             claim(core, terminal, "claude", cwd, session_id, current=current, owner_pid=owner_pid)
         else:
-            pin = current["value"]
-            if pin and pin.get("agent") == "claude" and pin.get("session_id") == session_id and pin.get("owner_pid") == owner_pid:
+            if owns_pin:
                 core.call("terminal.keep", dict(scope, keep=False))
 
 
