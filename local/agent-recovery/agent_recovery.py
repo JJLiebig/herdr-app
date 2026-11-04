@@ -207,6 +207,23 @@ def transcript_cwd(path, session_id):
     raise ValueError("session transcript has no saved working directory")
 
 
+def directory_cwd(event, session_id):
+    # Claude documents asynchronous transcript writes. Wait briefly for the move
+    # to be saved; never publish the previous directory just because it was last
+    # on disk. This runs only in the asynchronous CwdChanged hook.
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            saved = transcript_cwd(event["transcript_path"], session_id)
+        except (FileNotFoundError, ValueError):
+            saved = None
+        if saved is not None and Path(saved) != Path(event["old_cwd"]):
+            return saved
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.05)
+
+
 def claude_hook(config_path, event):
     if not all(os.environ.get(key) for key in ("HC_TERMINAL_ID", "HC_TERMINAL_SOCKET", "HC_SCOPE")):
         return
@@ -244,7 +261,9 @@ def claude_hook(config_path, event):
             # a delayed old session or re-enable a deliberately cleared recipe.
             if name == "CwdChanged" and (not owns_pin or not record.get("keep")):
                 return
-            directory = transcript_cwd(event["transcript_path"], session_id) if name == "CwdChanged" else event["cwd"]
+            directory = directory_cwd(event, session_id) if name == "CwdChanged" else event["cwd"]
+            if directory is None:
+                return
             cwd = str(Path(directory).resolve(strict=True))
             if not Path(cwd).is_dir():
                 raise ValueError("session working directory is unavailable")

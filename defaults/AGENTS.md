@@ -749,9 +749,10 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
 - On Windows, the personal fork's local Claude/Codex menu starts use
   `local/agent-recovery/<agent>.json` when present, with the helper bundle in
   that folder. Remote spaces and missing configs use the normal `run`.
-  - The personal Claude identity hooks in `local/agent-recovery/README.md` also
-    enroll plain attended `claude` launches and track native session changes;
-    install them on the agent's host. Status stays native OSC 7501.
+  - The personal Claude SessionStart/CwdChanged/SessionEnd hooks in
+    `local/agent-recovery/README.md` also enroll plain attended `claude` launches
+    and track native session and working-directory changes; install all three
+    on the agent's host. Status stays native OSC 7501.
 - `run`: how to start it (`["cursor-agent"]`), for agents people start
   from a menu: `knownAgents()` lists the entries with one, and whether this
   machine (or another) has them installed. For example, override

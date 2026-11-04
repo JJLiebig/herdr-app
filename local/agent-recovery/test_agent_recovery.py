@@ -504,7 +504,10 @@ class ClaudeHookTests(unittest.TestCase):
                     self.assertEqual(len(recipes), 1, "unchanged cwd must not rewrite recovery")
                     latest = root / "latest"
                     latest.mkdir()
-                    save_cwd(latest)
+                    delayed = dict(changed, cwd=str(latest), old_cwd=str(moved))
+                    with patch.object(helper.time, "sleep", side_effect=lambda _: save_cwd(latest)):
+                        helper.claude_hook(config, delayed)
+                    self.assertEqual(core.value["cwd"], str(latest.resolve()))
                     # A newer event finishes first; the older event still carries moved.
                     helper.claude_hook(config, dict(changed, cwd=str(latest)))
                     helper.claude_hook(config, changed)
@@ -515,6 +518,10 @@ class ClaudeHookTests(unittest.TestCase):
                     save_cwd(moved)
                     helper.claude_hook(config, dict(changed, cwd=str(latest)))
                     self.assertEqual(core.value["cwd"], str(moved.resolve()))
+                    version = core.version
+                    with patch.object(helper.time, "monotonic", side_effect=[0, 3]):
+                        helper.claude_hook(config, delayed)
+                    self.assertEqual(core.version, version, "unflushed history must not publish the old cwd")
                 helper.claude_hook(config, dict(start, hook_event_name="SessionEnd", reason="prompt_input_exit"))
                 helper.claude_hook(config, dict(changed, cwd=folder))
                 self.assertFalse(core.kept, "delayed directory hooks must not undo deliberate cleanup")
