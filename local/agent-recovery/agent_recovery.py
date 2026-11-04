@@ -272,6 +272,12 @@ def claude_hook(config_path, event):
             config_path, config = load_config(config_path)
             if config["agent"] != "claude":
                 raise ValueError("Claude hooks require a Claude config")
+            # The transcript retry can yield to an external `hc keep --off`.
+            # Re-read immediately before updating, rather than trusting the old snapshot.
+            if name == "CwdChanged":
+                record = core.call("terminal.get", dict(terminal=terminal))
+                if record["state"] != "live" or not record.get("keep"):
+                    return
             # Core validates HC_SCOPE here; its public terminal record deliberately omits it.
             core.call("terminal.keep", dict(scope, keep=True, recovery=dict(argv=vendor_command(config, session_id), cwd=cwd)))
             claim(core, terminal, "claude", cwd, session_id, current=current, owner_pid=owner_pid)

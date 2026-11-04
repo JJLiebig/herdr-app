@@ -522,6 +522,13 @@ class ClaudeHookTests(unittest.TestCase):
                     with patch.object(helper.time, "monotonic", side_effect=[0, 3]):
                         helper.claude_hook(config, delayed)
                     self.assertEqual(core.version, version, "unflushed history must not publish the old cwd")
+                    def disable_during_flush(_):
+                        core.kept = False
+                        save_cwd(latest)
+                    with patch.object(helper.time, "sleep", side_effect=disable_during_flush):
+                        helper.claude_hook(config, delayed)
+                    self.assertFalse(core.kept, "external keep-off during transcript wait must win")
+                    self.assertEqual(core.version, version)
                 helper.claude_hook(config, dict(start, hook_event_name="SessionEnd", reason="prompt_input_exit"))
                 helper.claude_hook(config, dict(changed, cwd=folder))
                 self.assertFalse(core.kept, "delayed directory hooks must not undo deliberate cleanup")
