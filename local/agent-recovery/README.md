@@ -52,6 +52,10 @@ for that same session and owner after a main-conversation shell directory change
 It runs asynchronously, so a stopped core or helper failure cannot delay or reject
 a prompt. It fires only on directory changes, avoiding per-prompt polling and
 unchanged-directory core calls; duplicate notifications do not rewrite recovery.
+Asynchronous notifications can finish out of order, so the helper reads the latest
+saved cwd from the tail of that session's transcript under its hook lock. A delayed
+notification therefore cannot restore an older folder. Missing/unreadable history
+leaves the saved registration unchanged.
 This event and its `cwd` input are present in Claude Code 2.1.318 and documented
 in the [hooks reference](https://code.claude.com/docs/en/hooks#cwdchanged).
 `CLAUDE_PID` owns cleanup; a delayed exit
@@ -102,7 +106,7 @@ an initial native report; collected references never qualify.
 The explicit Claude launcher can still choose a UUID with `--session-id`.
 Identity hooks replace that pin with Claude's actual attended main UUID and cwd,
 including in-process session changes. Recovery uses `--resume` with the saved
-UUID. No transcript inspection is involved.
+UUID. Directory updates use the latest saved main-session transcript cwd.
 
 OSC is unauthenticated PTY output and has no persistence acknowledgement. An
 unprocessed/unsaved report or a brand-new empty conversation is not recoverable

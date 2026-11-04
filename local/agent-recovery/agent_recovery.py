@@ -184,6 +184,29 @@ def recovery_command(config_path):
                 cwd=str(Path(__file__).resolve().parent))
 
 
+def transcript_cwd(path, session_id):
+    # CwdChanged notifications run independently and may arrive out of order.
+    # Read the latest persisted main-session cwd while holding the hook lock.
+    # Scan from the tail: ordinary directory changes need only the last chunk.
+    with Path(path).open("rb") as handle:
+        position = handle.seek(0, os.SEEK_END)
+        pending = b""
+        while position:
+            size = min(position, 65536)
+            position -= size
+            handle.seek(position)
+            lines = (handle.read(size) + pending).split(b"\n")
+            pending = lines.pop(0) if position else b""
+            for line in reversed(lines):
+                try:
+                    row = json.loads(line)
+                except (ValueError, UnicodeDecodeError):
+                    continue  # A concurrent append may leave the final line incomplete.
+                if isinstance(row, dict) and row.get("sessionId") == session_id and isinstance(row.get("cwd"), str):
+                    return row["cwd"]
+    raise ValueError("session transcript has no saved working directory")
+
+
 def claude_hook(config_path, event):
     if not all(os.environ.get(key) for key in ("HC_TERMINAL_ID", "HC_TERMINAL_SOCKET", "HC_SCOPE")):
         return
@@ -221,7 +244,8 @@ def claude_hook(config_path, event):
             # a delayed old session or re-enable a deliberately cleared recipe.
             if name == "CwdChanged" and (not owns_pin or not record.get("keep")):
                 return
-            cwd = str(Path(event["cwd"]).resolve(strict=True))
+            directory = transcript_cwd(event["transcript_path"], session_id) if name == "CwdChanged" else event["cwd"]
+            cwd = str(Path(directory).resolve(strict=True))
             if not Path(cwd).is_dir():
                 raise ValueError("session working directory is unavailable")
             if name == "CwdChanged" and pin.get("cwd") == cwd:

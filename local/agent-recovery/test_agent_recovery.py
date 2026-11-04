@@ -466,7 +466,13 @@ class ClaudeHookTests(unittest.TestCase):
             env = dict(HC_TERMINAL_ID="t1", HC_TERMINAL_SOCKET="hook-" + str(uuid.uuid4()), HC_SCOPE="scope",
                        CLAUDE_CODE_SESSION_ATTENDED="1", CLAUDE_PID="101")
             start = dict(hook_event_name="SessionStart", session_id=sid, cwd=folder)
-            changed = dict(start, hook_event_name="CwdChanged", cwd=str(moved), old_cwd=folder, new_cwd=str(moved))
+            transcript = root / "session.jsonl"
+            def save_cwd(directory):
+                with transcript.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(dict(sessionId=sid, cwd=str(directory))) + "\n")
+            save_cwd(moved)
+            changed = dict(start, hook_event_name="CwdChanged", cwd=str(moved), old_cwd=folder,
+                           new_cwd=str(moved), transcript_path=str(transcript))
             with patch.dict(helper.os.environ, env), patch.object(helper, "Core", return_value=core):
                 helper.claude_hook(config, changed)
                 self.assertIsNone(core.value, "directory changes cannot enroll a session")
@@ -496,6 +502,19 @@ class ClaudeHookTests(unittest.TestCase):
                     helper.claude_hook(config, changed)
                     self.assertEqual(core.version, version)
                     self.assertEqual(len(recipes), 1, "unchanged cwd must not rewrite recovery")
+                    latest = root / "latest"
+                    latest.mkdir()
+                    save_cwd(latest)
+                    # A newer event finishes first; the older event still carries moved.
+                    helper.claude_hook(config, dict(changed, cwd=str(latest)))
+                    helper.claude_hook(config, changed)
+                    self.assertEqual(core.value["cwd"], str(latest.resolve()))
+                    self.assertEqual(recipes[-1]["cwd"], str(latest.resolve()))
+                    self.assertEqual(len(recipes), 2)
+                    # Returning to a previous cwd is legitimate; a stale event cannot undo it.
+                    save_cwd(moved)
+                    helper.claude_hook(config, dict(changed, cwd=str(latest)))
+                    self.assertEqual(core.value["cwd"], str(moved.resolve()))
                 helper.claude_hook(config, dict(start, hook_event_name="SessionEnd", reason="prompt_input_exit"))
                 helper.claude_hook(config, dict(changed, cwd=folder))
                 self.assertFalse(core.kept, "delayed directory hooks must not undo deliberate cleanup")
