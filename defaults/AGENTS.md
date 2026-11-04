@@ -470,6 +470,10 @@ the build doesn't do.
 
 ## Keys: `keys.json`
 
+On upgrade, an untouched keys file from an earlier release gets the current
+shortcuts. Any edit, even whitespace, keeps the entire file as yours; new default
+shortcuts must then be added by hand.
+
 ```json
 {
   "global":   { "ctrl-shift-t": "tab.new", "ctrl-shift-o": "pane.split:right", "alt-1": "space.select:1" },
@@ -509,8 +513,9 @@ the build doesn't do.
 - Terminal keys honor the program's negotiated Kitty mode, including on Windows.
 - Windows terminal Escape stays separate from the following key.
 - Search: `ctrl-shift-f` (Cmd-F on macOS) opens a find bar inside the focused terminal;
-  Enter/Shift-Enter moves through matches and Escape closes it. Clicking the terminal
-  while the bar is open puts typing back in the program; the bar and its matches stay.
+  Enter/Shift-Enter moves through matches and Escape closes it while the find field
+  has focus. Clicking the terminal puts typing, including Escape, back in the program;
+  the bar and its matches stay.
   Each terminal keeps its own query, and reopening selects it so typing replaces it. Search covers the screen and scrollback without replacing text selection.
 
 ## Commands
