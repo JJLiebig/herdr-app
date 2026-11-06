@@ -26,6 +26,9 @@ The upstream instructions follow unchanged.
 - User-approved private fork work does not wait for upstream approval. Changes
   proposed to Can still follow his contribution and shared-API rules. Do not
   open upstream issues or PRs unless requested.
+- Before closing, rebuilding into or wiping an isolated Herdr test copy, run
+  `hc ls` on its session and leave it alone while the user has live terminals
+  in it.
 - Do not add fork branding, release pipelines, dependency churn or compatibility
   layers without a concrete need. Agent recovery currently targets Claude and
   Codex through personal launchers; status remains OSC 7501.
