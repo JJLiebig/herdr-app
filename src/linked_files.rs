@@ -83,14 +83,9 @@ fn links(home: &Path) -> Links {
     out
 }
 
-fn paths(home: &Path, links: &Links, event: &notify::Event) -> Vec<PathBuf> {
+fn paths(links: &Links, event: &notify::Event) -> Vec<PathBuf> {
     let mut changed = HashSet::new();
     for path in &event.paths {
-        if let Ok(rel) = path.strip_prefix(home) {
-            if crate::files::watched(rel) {
-                changed.insert(rel.to_path_buf());
-            }
-        }
         for (alias, target) in links {
             if target.starts_with(path) {
                 changed.insert(alias.clone());
@@ -110,35 +105,61 @@ fn paths(home: &Path, links: &Links, event: &notify::Event) -> Vec<PathBuf> {
 /// without locking inside notify's callback. The receiver owns its lifetime.
 pub fn watch(home: &Path) -> Option<async_channel::Receiver<crate::files::Changed>> {
     let home = home.canonicalize().ok()?;
+    let (tx, rx) = async_channel::unbounded();
     let (events_tx, events_rx) = std::sync::mpsc::channel();
     // inotify shares registrations inside one watcher, including directories
     // reached through symlinks. Keep home ownership separate from linked roots.
     let home_tx = events_tx.clone();
-    let mut home_watcher = notify::recommended_watcher(move |event| {
-        let _ = home_tx.send(event);
-    })
-    .ok()?;
+    let changes = tx.clone();
+    let base = home.clone();
+    let mut home_watcher =
+        notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            let Ok(event) = event else { return };
+            if matches!(event.kind, notify::EventKind::Access(_)) {
+                return;
+            }
+            // Ordinary home changes take upstream's direct callback path. Queuing
+            // them behind link discovery can deliver startup events after a window
+            // has begun waiting for later edits.
+            let changed: Vec<_> = event
+                .paths
+                .iter()
+                .filter_map(|p| p.strip_prefix(&base).ok())
+                .filter(|p| crate::files::watched(p))
+                .map(Path::to_path_buf)
+                .collect();
+            let home_changed = !changed.is_empty();
+            if home_changed {
+                let _ = changes.send_blocking(changed);
+            }
+            let _ = home_tx.send((Ok(event), home_changed));
+        })
+        .ok()?;
     home_watcher.watch(&home, RecursiveMode::Recursive).ok()?;
     let mut watcher = notify::recommended_watcher(move |event| {
-        let _ = events_tx.send(event);
+        let _ = events_tx.send((event, false));
     })
     .ok()?;
-    let (tx, rx) = async_channel::unbounded();
     let initial = links(&home);
     let initial_watches = refresh(&mut watcher, &home, &initial, HashSet::new());
     std::thread::spawn(move || {
         let mut linked = initial;
         let mut watching = initial_watches;
         while !tx.is_closed() {
-            let event = match events_rx.recv_timeout(std::time::Duration::from_millis(250)) {
-                Ok(Ok(event)) if !matches!(event.kind, notify::EventKind::Access(_)) => event,
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                _ => continue,
-            };
-            let mut changed = paths(&home, &linked, &event);
+            let (event, home_changed) =
+                match events_rx.recv_timeout(std::time::Duration::from_millis(250)) {
+                    Ok((Ok(event), home_changed))
+                        if !matches!(event.kind, notify::EventKind::Access(_)) =>
+                    {
+                        (event, home_changed)
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    _ => continue,
+                };
+            let mut changed = paths(&linked, &event);
             // Parent watches catch atomic saves and link retargeting. Only
             // rediscover on structural events; ordinary edits need no walk.
-            if !changed.is_empty()
+            if (home_changed || !changed.is_empty())
                 && !matches!(
                     event.kind,
                     notify::EventKind::Modify(notify::event::ModifyKind::Data(_))
