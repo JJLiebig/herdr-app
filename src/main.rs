@@ -6,6 +6,8 @@ mod commands;
 mod control;
 mod core_bin;
 mod files;
+mod linked_files;
+mod linked_mods;
 mod hc;
 mod keys;
 mod layout;
@@ -149,7 +151,7 @@ fn main() {
     }
 
     gpui_platform::application()
-        .with_assets(gpui_shell::AppAssets::new(mods::app_dir()))
+        .with_assets(linked_mods::Assets(mods::app_dir()))
         .run(move |cx| {
             let fonts = settings::BUNDLED_FONTS.iter().map(|f| std::borrow::Cow::Borrowed(*f)).collect();
             if let Err(e) = cx.text_system().add_fonts(fonts) {
