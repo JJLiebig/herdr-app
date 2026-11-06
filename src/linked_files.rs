@@ -103,14 +103,19 @@ fn paths(links: &Links, event: &notify::Event) -> Vec<PathBuf> {
 
 /// Owns the OS watcher on a worker thread, so link changes can rebuild watches
 /// without locking inside notify's callback. The receiver owns its lifetime.
-pub fn watch(home: &Path) -> Option<async_channel::Receiver<crate::files::Changed>> {
+pub fn watch(home: &Path, #[cfg(test)] executor: gpui::BackgroundExecutor) -> Option<async_channel::Receiver<crate::files::Changed>> {
     let home = home.canonicalize().ok()?;
     let (tx, rx) = async_channel::unbounded();
     let (events_tx, events_rx) = std::sync::mpsc::channel();
     // inotify shares registrations inside one watcher, including directories
     // reached through symlinks. Keep home ownership separate from linked roots.
     let home_tx = events_tx.clone();
+    #[cfg(not(test))]
     let changes = tx.clone();
+    #[cfg(test)]
+    let notifications = crate::files::test_notifications(tx.clone(), executor);
+    #[cfg(test)]
+    let changes = notifications.clone();
     let base = home.clone();
     let mut home_watcher =
         notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
@@ -130,7 +135,10 @@ pub fn watch(home: &Path) -> Option<async_channel::Receiver<crate::files::Change
                 .collect();
             let home_changed = !changed.is_empty();
             if home_changed {
+                #[cfg(not(test))]
                 let _ = changes.send_blocking(changed);
+                #[cfg(test)]
+                let _ = changes.send(changed);
             }
             let _ = home_tx.send((Ok(event), home_changed));
         })
@@ -192,7 +200,10 @@ pub fn watch(home: &Path) -> Option<async_channel::Receiver<crate::files::Change
                 linked = next;
             }
             if !changed.is_empty() {
+                #[cfg(not(test))]
                 let _ = tx.send_blocking(changed);
+                #[cfg(test)]
+                let _ = notifications.send(changed);
             }
         }
     });
@@ -263,10 +274,12 @@ mod tests {
     use super::*;
     use crate::linked_mods::tests::{link, sandbox};
 
-    fn wait(rx: &async_channel::Receiver<crate::files::Changed>, expected: &[&str]) {
+    fn wait(cx: &mut gpui::TestAppContext, rx: &async_channel::Receiver<crate::files::Changed>, expected: &[&str]) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut remaining: HashSet<PathBuf> = expected.iter().map(PathBuf::from).collect();
         while !remaining.is_empty() {
+            cx.executor().advance_clock(std::time::Duration::from_millis(20));
+            cx.run_until_parked();
             while let Ok(paths) = rx.try_recv() {
                 remaining.retain(|wanted| !paths.iter().any(|p| wanted.starts_with(p)));
             }
@@ -279,31 +292,31 @@ mod tests {
         while rx.try_recv().is_ok() {}
     }
 
-    #[test]
-    fn linked_watch_removal_keeps_ordinary_home_changes_live() {
+    #[gpui::test]
+    fn linked_watch_removal_keeps_ordinary_home_changes_live(cx: &mut gpui::TestAppContext) {
         let root = sandbox("watch-removal");
         let home = root.join("home");
         let target = root.join("external/mod");
         link(&target, &home.join("mods/linked"));
-        let rx = watch(&home).unwrap();
+        let rx = watch(&home, cx.background_executor.clone()).unwrap();
         #[cfg(windows)]
         std::fs::remove_dir(home.join("mods/linked")).unwrap();
         #[cfg(unix)]
         std::fs::remove_file(home.join("mods/linked")).unwrap();
-        wait(&rx, &["mods/linked"]);
+        wait(cx, &rx, &["mods/linked"]);
         std::fs::create_dir_all(home.join("mods/plain")).unwrap();
-        wait(&rx, &["mods/plain"]);
+        wait(cx, &rx, &["mods/plain"]);
         std::fs::write(home.join("mods/plain/main.js"), "one").unwrap();
-        wait(&rx, &["mods/plain/main.js"]);
+        wait(cx, &rx, &["mods/plain/main.js"]);
         std::fs::write(home.join("mods/plain/main.js"), "two").unwrap();
-        wait(&rx, &["mods/plain/main.js"]);
+        wait(cx, &rx, &["mods/plain/main.js"]);
         drop(rx);
         std::thread::sleep(std::time::Duration::from_millis(300));
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn linked_targets_reload_on_edits_atomic_saves_new_links_and_retargeting() {
+    #[gpui::test]
+    fn linked_targets_reload_on_edits_atomic_saves_new_links_and_retargeting(cx: &mut gpui::TestAppContext) {
         let root = sandbox("watch");
         let home = root.join("home");
         let external = root.join("external");
@@ -313,23 +326,23 @@ mod tests {
         link(&module, &home.join("mods/one"));
         link(&module, &home.join("mods/two"));
         link(&external.join("keys.json"), &home.join("keys.json"));
-        let rx = watch(&home).unwrap();
+        let rx = watch(&home, cx.background_executor.clone()).unwrap();
         std::fs::write(module.join("main.js"), "two").unwrap();
-        wait(&rx, &["mods/one/main.js", "mods/two/main.js"]);
+        wait(cx, &rx, &["mods/one/main.js", "mods/two/main.js"]);
         // Editors replace a target file without touching its installed link.
         crate::persist::write_atomic(&home.join("keys.json"), "{\"new\":true}").unwrap();
-        wait(&rx, &["keys.json"]);
+        wait(cx, &rx, &["keys.json"]);
         std::fs::create_dir_all(module.join("nested")).unwrap();
-        wait(&rx, &["mods/one/nested", "mods/two/nested"]);
+        wait(cx, &rx, &["mods/one/nested", "mods/two/nested"]);
         std::fs::write(module.join("nested/ui.js"), "nested").unwrap();
-        wait(&rx, &["mods/one/nested/ui.js", "mods/two/nested/ui.js"]);
+        wait(cx, &rx, &["mods/one/nested/ui.js", "mods/two/nested/ui.js"]);
         // A file link inside a plain mod gets the same translation.
         std::fs::create_dir_all(home.join("mods/plain")).unwrap();
         link(&module.join("main.js"), &home.join("mods/plain/main.js"));
-        wait(&rx, &["mods/plain/main.js"]);
+        wait(cx, &rx, &["mods/plain/main.js"]);
         std::fs::write(module.join("main.js"), "three").unwrap();
         wait(
-            &rx,
+            cx, &rx,
             &["mods/plain/main.js", "mods/one/main.js", "mods/two/main.js"],
         );
         let other = external.join("other");
@@ -340,47 +353,47 @@ mod tests {
         #[cfg(unix)]
         std::fs::remove_file(home.join("mods/one")).unwrap();
         link(&other, &home.join("mods/one"));
-        wait(&rx, &["mods/one"]);
+        wait(cx, &rx, &["mods/one"]);
         std::fs::write(other.join("main.js"), "updated").unwrap();
-        wait(&rx, &["mods/one/main.js"]);
+        wait(cx, &rx, &["mods/one/main.js"]);
         std::fs::remove_dir_all(&other).unwrap();
-        wait(&rx, &["mods/one"]);
+        wait(cx, &rx, &["mods/one"]);
         std::fs::create_dir_all(&other).unwrap();
-        wait(&rx, &["mods/one"]);
+        wait(cx, &rx, &["mods/one"]);
         std::fs::write(other.join("main.js"), "recreated").unwrap();
-        wait(&rx, &["mods/one/main.js"]);
+        wait(cx, &rx, &["mods/one/main.js"]);
         #[cfg(unix)]
         std::os::unix::fs::symlink("../../external/mod", home.join("mods/relative")).unwrap();
         #[cfg(windows)]
         std::os::windows::fs::symlink_dir("../../external/mod", home.join("mods/relative"))
             .unwrap();
-        wait(&rx, &["mods/relative"]);
+        wait(cx, &rx, &["mods/relative"]);
         std::fs::write(module.join("main.js"), "relative edit").unwrap();
-        wait(&rx, &["mods/relative/main.js"]);
+        wait(cx, &rx, &["mods/relative/main.js"]);
         // An intermediate release link can move without touching home.
         link(&module, &external.join("current"));
         link(&external.join("current"), &home.join("mods/chain"));
-        wait(&rx, &["mods/chain"]);
+        wait(cx, &rx, &["mods/chain"]);
         #[cfg(windows)]
         std::fs::remove_dir(external.join("current")).unwrap();
         #[cfg(unix)]
         std::fs::remove_file(external.join("current")).unwrap();
         link(&other, &external.join("current"));
-        wait(&rx, &["mods/chain"]);
+        wait(cx, &rx, &["mods/chain"]);
         std::fs::write(other.join("main.js"), "chain retargeted").unwrap();
-        wait(&rx, &["mods/chain/main.js"]);
+        wait(cx, &rx, &["mods/chain/main.js"]);
         // Install a dangling file link before even its parent exists.
         let future = external.join("future/deep/main.js");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&future, home.join("mods/plain/future.js")).unwrap();
         #[cfg(windows)]
         std::os::windows::fs::symlink_file(&future, home.join("mods/plain/future.js")).unwrap();
-        wait(&rx, &["mods/plain/future.js"]);
+        wait(cx, &rx, &["mods/plain/future.js"]);
         std::fs::create_dir_all(future.parent().unwrap()).unwrap();
         std::fs::write(&future, "created later").unwrap();
-        wait(&rx, &["mods/plain/future.js"]);
+        wait(cx, &rx, &["mods/plain/future.js"]);
         std::fs::write(&future, "edited later").unwrap();
-        wait(&rx, &["mods/plain/future.js"]);
+        wait(cx, &rx, &["mods/plain/future.js"]);
         drop(rx);
         // Wait for worker disposal before removing watched directories on Windows.
         std::thread::sleep(std::time::Duration::from_millis(300));

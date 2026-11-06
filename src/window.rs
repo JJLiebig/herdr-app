@@ -533,7 +533,7 @@ impl AppWindow {
             pane_history: Vec::new(),
             window_active: true,
             system_dark: is_dark(window.appearance()),
-            file_events: crate::files::watch(&mods::app_dir()),
+            file_events: crate::files::watch(&mods::app_dir(), #[cfg(test)] cx.background_executor().clone()),
             polls: 0,
             update_ready: None,
             update_dismissed: None,
@@ -2302,7 +2302,7 @@ impl AppWindow {
             return self.close_overlay(&id, window, cx);
         }
         if self.chrome.find(block).is_some_and(|n| n.terminal().is_some()) {
-            self.chrome.remove(block);
+            self.chrome.remove_slot(block);
             self.sync(window, cx);
         }
         // How its stream ended, for `reconcile` (`hc run --rm` leaves no record).
@@ -2694,7 +2694,22 @@ impl AppWindow {
     fn run_action(&mut self, action: &str, window: &mut Window, cx: &mut Context<Self>) {
         // `send:` is only meaningful in a terminal, which handles it before it gets here.
         if !action.starts_with("send:") {
-            self.run(action, Value::Null, window, cx);
+            self.run_key(action, Value::Null, window, cx);
+        }
+    }
+
+    fn run_key(&mut self, name: &str, args: Value, window: &mut Window, cx: &mut Context<Self>) {
+        // Close the dialog holding the keyboard, not the terminal behind it.
+        let implicit_close = match crate::keys::current(name).as_str() {
+            "tab.close" => Self::arg(&args, "id").is_none(),
+            "pane.close" => Self::arg(&args, "pane").is_none(),
+            _ => false,
+        };
+        if implicit_close && self.overlays.iter().any(|o| o.kind.modal_keys())
+        {
+            self.run("overlay.close", json!({}), window, cx);
+        } else {
+            self.run(name, args, window, cx);
         }
     }
 
@@ -4899,7 +4914,7 @@ impl Render for AppWindow {
                             w.dispatch_action(action, cx);
                             return;
                         }
-                        this.run(&name, args, w, cx);
+                        this.run_key(&name, args, w, cx);
                     }
                     Err(error) => this.command_error("Key binding", &error, w, cx),
                 }
@@ -5407,6 +5422,49 @@ mod tests {
         assert!(!pane_focused(cx), "hidden, the pane can't hold the keyboard");
         select("main", cx);
         assert!(pane_focused(cx));
+    }
+
+    #[test]
+    fn close_keys_dismiss_the_top_dialog_without_closing_the_tab() {
+        in_own_process("close_keys_dismiss_dialog");
+    }
+
+    #[gpui::test]
+    fn close_keys_dismiss_dialog(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("close_keys_dismiss_dialog") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "root", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            this.sync(window, cx);
+            this.open_overlay("bottom".into(), json!({"kind": "dialog"}), window, cx);
+            for kind in ["dialog", "popup"] {
+                for name in ["tab.close", "pane.close"] {
+                    let mut bindings = vec![None, Some(json!({}))];
+                    if name == "tab.close" {
+                        bindings.extend([Some(json!({"confirmed": true})), Some(json!({"id": null})), Some(json!({"id": null, "confirmed": true}))]);
+                    } else {
+                        bindings.push(Some(json!({"pane": null})));
+                    }
+                    for args in bindings {
+                        this.open_overlay("top".into(), json!({"kind": kind}), window, cx);
+                        if let Some(args) = args {
+                            this.run_key(name, args, window, cx);
+                        } else {
+                            this.run_action(name, window, cx);
+                        }
+                        assert!(!this.overlays.iter().any(|o| o.id == "top"));
+                        assert!(this.overlays.iter().any(|o| o.id == "bottom"));
+                        assert_eq!(this.model.focused_pane().as_deref(), Some("p1"));
+                        assert!(this.model.tab("tb1").is_some());
+                    }
+                }
+            }
+        }));
     }
 
     #[test]
