@@ -7,6 +7,26 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+// Remember requested assets until invalidation, including files subsequently
+// absent from a retargeted directory. Disk enumeration cannot find those keys.
+static LOADED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+    std::sync::OnceLock::new();
+fn loaded() -> std::sync::MutexGuard<'static, std::collections::HashSet<PathBuf>> {
+    LOADED.get_or_init(Default::default).lock().unwrap()
+}
+pub fn changed_assets(changed: &[PathBuf]) -> Vec<PathBuf> {
+    let mut assets = Vec::new();
+    loaded().retain(|path| {
+        if changed.iter().any(|prefix| path.starts_with(prefix)) {
+            assets.push(path.clone());
+            false
+        } else {
+            true
+        }
+    });
+    assets
+}
+
 pub struct Assets(pub PathBuf);
 
 impl Assets {
@@ -55,8 +75,13 @@ impl Assets {
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        let key = AppAssets::cache_key(path);
         let (source, path) = self.source(path);
-        source.load(&path)
+        let result = source.load(&path);
+        if matches!(&result, Ok(Some(_))) {
+            loaded().insert(PathBuf::from(key.as_ref()));
+        }
+        result
     }
     fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
         let (source, path) = self.source(path);
@@ -96,30 +121,30 @@ pub(crate) mod tests {
         std::fs::write(external.join("mod/picture.png"), b"png bytes").unwrap();
         std::fs::write(external.join("chosen.svg"), b"chosen").unwrap();
         std::fs::write(external.join("secret.svg"), b"secret").unwrap();
-        link(&external.join("mod"), &home.join("mods/probe"));
+        link(&external.join("mod"), &home.join("mods/linked-assets-probe"));
         link(&external.join("chosen.svg"), &external.join("mod/file.svg"));
         let assets = Assets(home.clone());
         for (path, bytes) in [
-            ("mods/probe/icon.svg", b"<svg/>".as_slice()),
-            ("mods/probe/picture.png", b"png bytes"),
-            ("mods/probe/file.svg", b"chosen"),
+            ("mods/linked-assets-probe/icon.svg", b"<svg/>".as_slice()),
+            ("mods/linked-assets-probe/picture.png", b"png bytes"),
+            ("mods/linked-assets-probe/file.svg", b"chosen"),
         ] {
             assert_eq!(assets.load(path).unwrap().unwrap().as_ref(), bytes);
         }
         assert!(
             assets
-                .list("mods/probe")
+                .list("mods/linked-assets-probe")
                 .unwrap()
                 .iter()
                 .any(|name| name.as_ref() == "icon.svg")
         );
-        assert!(assets.load("mods/probe/../secret.svg").is_err());
+        assert!(assets.load("mods/linked-assets-probe/../secret.svg").is_err());
         assert!(assets.load("../external/secret.svg").is_err());
         let absolute = assets.load(external.join("secret.svg").to_str().unwrap());
         assert!(!matches!(absolute, Ok(Some(bytes)) if bytes.as_ref() == b"secret"));
         link(&external, &home.join("ungranted"));
         assert!(assets.load("ungranted/secret.svg").is_err());
-        assert!(assets.load("mods/probe/missing.svg").unwrap().is_none());
+        assert!(assets.load("mods/linked-assets-probe/missing.svg").unwrap().is_none());
         // Retargeting changes the bytes at the same logical/cache path.
         std::fs::remove_file(external.join("mod/file.svg")).unwrap();
         link(
@@ -128,12 +153,15 @@ pub(crate) mod tests {
         );
         assert_eq!(
             assets
-                .load("mods/probe/file.svg")
+                .load("mods/linked-assets-probe/file.svg")
                 .unwrap()
                 .unwrap()
                 .as_ref(),
             b"<svg/>"
         );
+        std::fs::remove_file(external.join("mod/picture.png")).unwrap();
+        assert!(changed_assets(&["mods/linked-assets-probe".into()]).contains(&"mods/linked-assets-probe/picture.png".into()));
+        assert!(assets.load("mods/linked-assets-probe/picture.png").unwrap().is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -1,11 +1,34 @@
 //! Watches linked configuration targets and translates events back to home paths.
 use notify::{RecursiveMode, Watcher};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     path::{Path, PathBuf},
 };
 
-type Links = HashMap<PathBuf, PathBuf>;
+type Links = HashSet<(PathBuf, PathBuf)>;
+
+// Include every link in a chain: watching only canonical targets misses an
+// intermediate "current" link being switched to a different release.
+fn link_targets(path: &Path, alias: &Path, out: &mut Links, depth: usize) {
+    if depth == 40 {
+        return;
+    } // Match persist's symlink-cycle bound.
+    for ancestor in path.ancestors() {
+        if ancestor.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
+            out.insert((alias.to_path_buf(), ancestor.to_path_buf()));
+            if let Ok(target) = std::fs::read_link(ancestor) {
+                let target = ancestor
+                    .parent()
+                    .unwrap_or(Path::new(""))
+                    .join(target)
+                    .join(path.strip_prefix(ancestor).unwrap());
+                link_targets(&target, alias, out, depth + 1);
+            }
+            return;
+        }
+    }
+    out.insert((alias.to_path_buf(), path.to_path_buf()));
+}
 
 fn links(home: &Path) -> Links {
     fn visit(home: &Path, rel: PathBuf, ancestors: &mut HashSet<PathBuf>, out: &mut Links) {
@@ -13,20 +36,12 @@ fn links(home: &Path) -> Links {
             return;
         }
         let path = home.join(&rel);
-        let real = path.canonicalize().or_else(|error| {
-            // Keep a dangling installed link's parent watched, so creating or
-            // replacing its target later can restore the live watch.
-            if !path.symlink_metadata()?.is_symlink() {
-                return Err(error);
-            }
-            let target = crate::persist::resolve_target(&path)?;
-            let parent = target.parent().ok_or(error)?.canonicalize()?;
-            Ok(parent.join(target.file_name().unwrap()))
-        });
-        let Ok(real) = real else { return };
         if path.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
-            out.insert(rel.clone(), real.clone());
+            link_targets(&path, &rel, out, 0);
         }
+        let Ok(real) = path.canonicalize() else {
+            return;
+        };
         if !real.is_dir() || !ancestors.insert(real.clone()) {
             return;
         }
@@ -60,6 +75,9 @@ fn paths(home: &Path, links: &Links, event: &notify::Event) -> Vec<PathBuf> {
             }
         }
         for (alias, target) in links {
+            if target.starts_with(path) {
+                changed.insert(alias.clone());
+            }
             if let Ok(suffix) = path.strip_prefix(target) {
                 let rel = alias.join(suffix);
                 if crate::files::watched(&rel) {
@@ -104,7 +122,7 @@ pub fn watch(home: &Path) -> Option<async_channel::Receiver<crate::files::Change
             {
                 let next = links(&home);
                 for (alias, target) in &next {
-                    if linked.get(alias) != Some(target) {
+                    if !linked.contains(&(alias.clone(), target.clone())) {
                         changed.push(alias.clone());
                     }
                 }
@@ -135,11 +153,11 @@ fn refresh(
     old: HashSet<(PathBuf, bool)>,
 ) -> HashSet<(PathBuf, bool)> {
     let mut desired = HashSet::new();
-    for target in links.values() {
+    for (_, target) in links {
         if target.is_dir() && target != home {
             desired.insert((target.clone(), true));
         }
-        if let Some(parent) = target.parent() {
+        if let Some(parent) = target.ancestors().skip(1).find(|p| p.is_dir()) {
             if parent != home {
                 desired.insert((parent.to_path_buf(), false));
             }
@@ -245,6 +263,30 @@ mod tests {
         wait(&rx, &["mods/one"]);
         std::fs::write(other.join("main.js"), "recreated").unwrap();
         wait(&rx, &["mods/one/main.js"]);
+        // An intermediate release link can move without touching home.
+        link(&module, &external.join("current"));
+        link(&external.join("current"), &home.join("mods/chain"));
+        wait(&rx, &["mods/chain"]);
+        #[cfg(windows)]
+        std::fs::remove_dir(external.join("current")).unwrap();
+        #[cfg(unix)]
+        std::fs::remove_file(external.join("current")).unwrap();
+        link(&other, &external.join("current"));
+        wait(&rx, &["mods/chain"]);
+        std::fs::write(other.join("main.js"), "chain retargeted").unwrap();
+        wait(&rx, &["mods/chain/main.js"]);
+        // Install a dangling file link before even its parent exists.
+        let future = external.join("future/deep/main.js");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&future, home.join("mods/plain/future.js")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&future, home.join("mods/plain/future.js")).unwrap();
+        wait(&rx, &["mods/plain/future.js"]);
+        std::fs::create_dir_all(future.parent().unwrap()).unwrap();
+        std::fs::write(&future, "created later").unwrap();
+        wait(&rx, &["mods/plain/future.js"]);
+        std::fs::write(&future, "edited later").unwrap();
+        wait(&rx, &["mods/plain/future.js"]);
         drop(rx);
         // Wait for worker disposal before removing watched directories on Windows.
         std::thread::sleep(std::time::Duration::from_millis(300));

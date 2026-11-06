@@ -3849,7 +3849,10 @@ impl AppWindow {
         if changed.iter().any(|p| top(p) == "layouts") {
             self.check_layout_file(window, cx);
         }
-        let edited: BTreeSet<String> = changed.iter().filter_map(|p| crate::files::mod_of(p)).collect();
+        let mut edited: BTreeSet<String> = changed.iter().filter_map(|p| crate::files::mod_of(p)).collect();
+        if changed.iter().any(|p| p == std::path::Path::new("mods")) {
+            edited.extend(self.folders.keys().cloned());
+        }
         if edited.is_empty() {
             return;
         }
@@ -4903,7 +4906,7 @@ fn invalidate_image(resource: &gpui::Resource, window: &mut Window, cx: &mut gpu
 /// the watcher ignores (hidden, `node_modules`) and stops at a mod-sized limit.
 fn changed_asset_paths(home: &std::path::Path, changed: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
     const MAX_FILES: usize = 2000;
-    let mut paths: std::collections::BTreeSet<_> = changed.iter().cloned().collect();
+    let mut paths: std::collections::BTreeSet<_> = changed.iter().cloned().chain(crate::linked_mods::changed_assets(changed)).collect();
     let mut seen = std::collections::HashSet::new();
     let mut pending: Vec<_> = changed.iter().filter(|p| p.starts_with("mods")).map(|p| (p.clone(), std::collections::HashSet::new())).collect();
     while let Some((path, mut ancestors)) = pending.pop() {
