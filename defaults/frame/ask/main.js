@@ -110,7 +110,7 @@ export default class Ask extends View {
     // Below the footer's top border: the rail's rows are 21 px from 2 px down
     // (Change anything is its second row), the wide row 28 px from 4 px down.
     const top = height - (footer.size?.px ?? 69) + 1;
-    const [x, middle] = wide < 160 ? [16, top + 2 + 21 + 10.5] : [wide - 16 - SPINNER, top + 4 + 14];
+    const [x, middle] = wide < 160 ? [(wide - SPINNER) / 2, top + 2 + 21 + 10.5] : [wide - 16 - SPINNER, top + 4 + 14];
     return { x, y: middle - SPINNER / 2, w: SPINNER, h: SPINNER };
   }
 
