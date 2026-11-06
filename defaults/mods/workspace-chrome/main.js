@@ -71,11 +71,12 @@ export default class WorkspaceChrome extends View {
       // The rail stacks Change anything as a third row in the same height.
       const rowH = collapsed ? 21 : 28;
       const row = (id, icon, label, dim, action) => h_flex().id(id).h(rowH).px(8).gap(9).items_center().rounded(8)
+        .when(collapsed, el => el.relative().w(32).px(0).justify_center().tooltip(label))
         .text_color(dim ? t.dim : t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)).cursor_pointer()
         .on_click(action).child(svg(`mods/workspace-chrome/${icon}.svg`).size(14).flex_none())
         .when(!collapsed, el => el.child(label));
       const settingsRow = row("settings", "settings", "Settings", false, () => run("app.settings"))
-        .when(Boolean(updates().app.ready), el => el.child(div().size(6).rounded_full().bg(t.accent)));
+        .when(Boolean(updates().app.ready), el => el.child(div().size(6).rounded_full().bg(t.accent).when(collapsed, el => el.absolute().top(5).right(6))));
       const status = this.askShown = this.askStatus();
       const spinner = svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900);
       // As the agents list marks one that needs you.
@@ -83,12 +84,13 @@ export default class WorkspaceChrome extends View {
         .flex().items_center().justify_center().child("!");
       const chat = svg("mods/workspace-chrome/message-circle.svg").size(14).flex_none();
       const askRow = h_flex().id("ask").h(rowH).px(8).gap(6).items_center().rounded(8)
+        .when(collapsed, el => el.w(32).px(0).justify_center().tooltip("Change anything"))
         .text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground)).cursor_pointer()
         .on_click(() => run("app.ask"));
       const footer = v_flex().size_full().bg(t.chrome).border_t(1).border_color(t.border).px(8).text_size(13)
         .children((this.icons ?? []).map(icon => image(icon).absolute().size(1).opacity(0)));
       if (collapsed) {
-        return footer.pt(2).pb(3)
+        return footer.px(0).items_center().pt(2).pb(3)
           .child(settingsRow)
           .child(askRow.child(status === "working" ? spinner : status === "blocked" ? needsYou : chat.when(status === "done", el => el.text_color(t.done))))
           .child(row("machine", "plus", "Add machine", true, () => run("mod.open", { name: "machine-add" })));
