@@ -15,7 +15,12 @@ fn link_targets(path: &Path, alias: &Path, out: &mut Links, depth: usize) {
     } // Match persist's symlink-cycle bound.
     for ancestor in path.ancestors() {
         if ancestor.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
-            out.insert((alias.to_path_buf(), ancestor.to_path_buf()));
+            let location = ancestor
+                .parent()
+                .and_then(|p| p.canonicalize().ok())
+                .map(|p| p.join(ancestor.file_name().unwrap()))
+                .unwrap_or_else(|| ancestor.to_path_buf());
+            out.insert((alias.to_path_buf(), location));
             if let Ok(target) = std::fs::read_link(ancestor) {
                 let mut target = ancestor.parent().unwrap_or(Path::new("")).join(target);
                 let suffix = path.strip_prefix(ancestor).unwrap();
@@ -28,7 +33,18 @@ fn link_targets(path: &Path, alias: &Path, out: &mut Links, depth: usize) {
             return;
         }
     }
-    out.insert((alias.to_path_buf(), path.to_path_buf()));
+    // FSEvents reports resolved paths; keep relative links and macOS /var
+    // aliases in the same spelling, even when the final file is still missing.
+    let target = path
+        .ancestors()
+        .find_map(|parent| {
+            parent
+                .canonicalize()
+                .ok()
+                .map(|real| real.join(path.strip_prefix(parent).unwrap()))
+        })
+        .unwrap_or_else(|| path.to_path_buf());
+    out.insert((alias.to_path_buf(), target));
 }
 
 fn links(home: &Path) -> Links {
@@ -95,11 +111,18 @@ fn paths(home: &Path, links: &Links, event: &notify::Event) -> Vec<PathBuf> {
 pub fn watch(home: &Path) -> Option<async_channel::Receiver<crate::files::Changed>> {
     let home = home.canonicalize().ok()?;
     let (events_tx, events_rx) = std::sync::mpsc::channel();
+    // inotify shares registrations inside one watcher, including directories
+    // reached through symlinks. Keep home ownership separate from linked roots.
+    let home_tx = events_tx.clone();
+    let mut home_watcher = notify::recommended_watcher(move |event| {
+        let _ = home_tx.send(event);
+    })
+    .ok()?;
+    home_watcher.watch(&home, RecursiveMode::Recursive).ok()?;
     let mut watcher = notify::recommended_watcher(move |event| {
         let _ = events_tx.send(event);
     })
     .ok()?;
-    watcher.watch(&home, RecursiveMode::Recursive).ok()?;
     let (tx, rx) = async_channel::unbounded();
     let initial = links(&home);
     let initial_watches = refresh(&mut watcher, &home, &initial, HashSet::new());
@@ -137,6 +160,14 @@ pub fn watch(home: &Path) -> Option<async_channel::Receiver<crate::files::Change
                     !replaced
                 });
                 watching = refresh(&mut watcher, &home, &next, watching);
+                if linked != next {
+                    // Removing a followed link can remove a shared inotify
+                    // descriptor for a real home directory; rebuild that tree.
+                    let _ = home_watcher.unwatch(&home);
+                    if let Err(error) = home_watcher.watch(&home, RecursiveMode::Recursive) {
+                        tracing::warn!("cannot refresh home watch: {error}");
+                    }
+                }
                 linked = next;
             }
             if !changed.is_empty() {
@@ -155,7 +186,10 @@ fn refresh(
 ) -> HashSet<(PathBuf, bool)> {
     let mut desired = HashSet::new();
     for (_, target) in links {
-        if target.is_dir() && target != home {
+        if target.is_dir()
+            && target != home
+            && !target.symlink_metadata().is_ok_and(|m| m.is_symlink())
+        {
             desired.insert((target.clone(), true));
         }
         if let Some(parent) = target.ancestors().skip(1).find(|p| p.is_dir()) {
@@ -170,7 +204,14 @@ fn refresh(
         .filter(|(_, recursive)| *recursive)
         .map(|(p, _)| p.clone())
         .collect();
-    desired.retain(|(p, r)| *r || !recursive.contains(p));
+    // notify's recursive inotify watches share descendant registrations. An
+    // overlapping extra watch must never unwatch part of another root.
+    desired.retain(|(p, r)| {
+        (*r || !recursive.contains(p))
+            && !recursive
+                .iter()
+                .any(|root| root != p && p.starts_with(root))
+    });
     for (path, _) in old.difference(&desired) {
         let _ = watcher.unwatch(path);
     }
@@ -215,6 +256,29 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         while rx.try_recv().is_ok() {}
+    }
+
+    #[test]
+    fn linked_watch_removal_keeps_ordinary_home_changes_live() {
+        let root = sandbox("watch-removal");
+        let home = root.join("home");
+        let target = root.join("external/mod");
+        link(&target, &home.join("mods/linked"));
+        let rx = watch(&home).unwrap();
+        #[cfg(windows)]
+        std::fs::remove_dir(home.join("mods/linked")).unwrap();
+        #[cfg(unix)]
+        std::fs::remove_file(home.join("mods/linked")).unwrap();
+        wait(&rx, &["mods/linked"]);
+        std::fs::create_dir_all(home.join("mods/plain")).unwrap();
+        wait(&rx, &["mods/plain"]);
+        std::fs::write(home.join("mods/plain/main.js"), "one").unwrap();
+        wait(&rx, &["mods/plain/main.js"]);
+        std::fs::write(home.join("mods/plain/main.js"), "two").unwrap();
+        wait(&rx, &["mods/plain/main.js"]);
+        drop(rx);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -264,6 +328,14 @@ mod tests {
         wait(&rx, &["mods/one"]);
         std::fs::write(other.join("main.js"), "recreated").unwrap();
         wait(&rx, &["mods/one/main.js"]);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("../../external/mod", home.join("mods/relative")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir("../../external/mod", home.join("mods/relative"))
+            .unwrap();
+        wait(&rx, &["mods/relative"]);
+        std::fs::write(module.join("main.js"), "relative edit").unwrap();
+        wait(&rx, &["mods/relative/main.js"]);
         // An intermediate release link can move without touching home.
         link(&module, &external.join("current"));
         link(&external.join("current"), &home.join("mods/chain"));
