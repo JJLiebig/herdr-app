@@ -284,6 +284,7 @@ struct Copy {
     /// Its number for commands (`mods::prepare_load`); 0 if it never loaded.
     id: u64,
     root: Option<Entity<ShellRoot>>,
+    source: Option<std::path::PathBuf>,
     _watch: Option<Watcher>,
     error: Option<String>,
 }
@@ -1637,11 +1638,12 @@ impl AppWindow {
     }
 
     fn load(&self, inst: Instance, window: &mut Window, cx: &mut Context<Self>) -> Copy {
-        let mut copy = Copy { inst, id: 0, root: None, _watch: None, error: None };
+        let mut copy = Copy { inst, id: 0, root: None, source: None, _watch: None, error: None };
         let (Some(runtime), Some(folder)) = (&self.runtime, self.folders.get(&copy.inst.name)) else {
             copy.error = Some(format!("no mod folder ~/.config/herdr-app/mods/{}", copy.inst.name));
             return copy;
         };
+        copy.source = folder.dir.canonicalize().ok();
         copy.id = mods::prepare_load(&copy.inst);
         match runtime.try_load(&folder.dir, window, cx) {
             Ok(root) => {
@@ -3882,6 +3884,13 @@ impl AppWindow {
         let fresh: Vec<Found> = found.values().filter(|f| !self.seen.contains(&f.id)).cloned().collect();
         self.folders = found;
 
+        // Shell applications keep their canonical root. A retargeted installed
+        // link needs a new application; reloading the old root reads old code.
+        let moved: Vec<_> = self.copies.iter().filter(|(_, copy)| copy.root.is_some()
+            && copy.source != self.folders.get(&copy.inst.name).and_then(|f| f.dir.canonicalize().ok()))
+            .map(|(slot, _)| slot.clone()).collect();
+        for slot in &moved { self.remove_copy(slot, window, cx); }
+
         // Copies that failed get another try when their folder changes; loaded ones hot-reload.
         let retry: Vec<String> = self.copies.iter().filter(|(_, c)| c.root.is_none() && (edited.contains(&c.inst.name) || added)).map(|(s, _)| s.clone()).collect();
         for slot in &retry {
@@ -3902,7 +3911,7 @@ impl AppWindow {
                 dock(&mut self.chrome, block, place, self.model.fresh_id("r"));
             }
         }
-        if !retry.is_empty() || added || removed {
+        if !retry.is_empty() || !moved.is_empty() || added || removed {
             self.sync(window, cx);
         }
     }

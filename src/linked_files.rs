@@ -17,11 +17,12 @@ fn link_targets(path: &Path, alias: &Path, out: &mut Links, depth: usize) {
         if ancestor.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
             out.insert((alias.to_path_buf(), ancestor.to_path_buf()));
             if let Ok(target) = std::fs::read_link(ancestor) {
-                let target = ancestor
-                    .parent()
-                    .unwrap_or(Path::new(""))
-                    .join(target)
-                    .join(path.strip_prefix(ancestor).unwrap());
+                let mut target = ancestor.parent().unwrap_or(Path::new("")).join(target);
+                let suffix = path.strip_prefix(ancestor).unwrap();
+                // A trailing slash makes Unix stat follow a directory link.
+                if !suffix.as_os_str().is_empty() {
+                    target.push(suffix);
+                }
                 link_targets(&target, alias, out, depth + 1);
             }
             return;
