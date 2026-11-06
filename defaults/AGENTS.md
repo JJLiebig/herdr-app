@@ -1027,3 +1027,8 @@ including a small herdr-core skill you can install with the user's permission.
 - One mod per idea. Don't edit `AGENTS.md` or the `.d.ts` files (the app
   rewrites them). Don't touch other mods unless the request
   needs it.
+
+Personal fork: user-installed links under `mods/` are explicit asset locations;
+SVGs and images load through them. Linked configuration and mod files hot-reload
+when their targets change, including atomic saves. Asset paths still reject `..`;
+files outside home need an installed mod link to be readable as assets.

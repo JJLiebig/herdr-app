@@ -143,3 +143,8 @@ Never experiment with pointer/key automation on the person's real display.
 When developing the app on Linux, its `scripts/sandbox` provides an isolated
 home, core and display: `up`, `do`, `status`, `shot`, then `down` when done.
 Never stop a server or session you didn't start.
+
+Personal fork: user-installed links under `mods/` are explicit asset locations;
+SVGs and images load through them. Linked configuration and mod files hot-reload
+when their targets change, including atomic saves. Asset paths still reject `..`;
+files outside home need an installed mod link to be readable as assets.

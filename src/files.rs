@@ -13,30 +13,12 @@ pub type Changed = Vec<PathBuf>;
 /// Starts watching `home`; None if the OS watcher can't start (the app then
 /// polls as before).
 pub fn watch(home: &Path) -> Option<async_channel::Receiver<Changed>> {
-    static WATCHER: OnceLock<std::sync::Mutex<notify::RecommendedWatcher>> = OnceLock::new();
-    let (tx, rx) = async_channel::unbounded();
-    let root = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
-    let base = root.clone();
-    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        let Ok(event) = event else { return };
-        if matches!(event.kind, notify::EventKind::Access(_)) {
-            return;
-        }
-        let changed: Changed = event.paths.iter().filter_map(|p| p.strip_prefix(&base).ok()).filter(|p| watched(p)).map(Path::to_path_buf).collect();
-        if !changed.is_empty() {
-            let _ = tx.send_blocking(changed);
-        }
-    })
-    .map_err(|e| tracing::warn!("file watching unavailable ({e}); polling instead"))
-    .ok()?;
-    watcher.watch(&root, RecursiveMode::Recursive).map_err(|e| tracing::warn!("cannot watch {} ({e}); polling instead", root.display())).ok()?;
-    WATCHER.set(std::sync::Mutex::new(watcher)).ok()?;
-    Some(rx)
+    crate::linked_files::watch(home)
 }
 
 /// The files that change what the app shows. The app's own state files
 /// (view.json, shared.json, data/) change all the time and aren't.
-fn watched(rel: &Path) -> bool {
+pub(crate) fn watched(rel: &Path) -> bool {
     let mut parts = rel.components();
     let first = parts.next().and_then(|c| c.as_os_str().to_str()).unwrap_or_default();
     match first {

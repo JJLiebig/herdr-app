@@ -4905,10 +4905,13 @@ fn changed_asset_paths(home: &std::path::Path, changed: &[std::path::PathBuf]) -
     const MAX_FILES: usize = 2000;
     let mut paths: std::collections::BTreeSet<_> = changed.iter().cloned().collect();
     let mut seen = std::collections::HashSet::new();
-    let mut pending: Vec<_> = changed.iter().filter(|p| p.starts_with("mods")).cloned().collect();
-    while let Some(path) = pending.pop() {
-        // Do not follow symlinks out of the mod folder (or into a cycle).
-        if !seen.insert(path.clone()) || !home.join(&path).symlink_metadata().is_ok_and(|m| m.is_dir()) { continue; }
+    let mut pending: Vec<_> = changed.iter().filter(|p| p.starts_with("mods")).map(|p| (p.clone(), std::collections::HashSet::new())).collect();
+    while let Some((path, mut ancestors)) = pending.pop() {
+        if !seen.insert(path.clone()) || !home.join(&path).is_dir() { continue; }
+        let Ok(real) = home.join(&path).canonicalize() else { continue };
+        // Installed links are asset locations too; stop only cycles along this
+        // branch, so two aliases of one mod each keep their own cache keys.
+        if !ancestors.insert(real) { continue; }
         let Ok(entries) = std::fs::read_dir(home.join(&path)) else { continue };
         for entry in entries.flatten() {
             let name = entry.file_name();
@@ -4916,8 +4919,8 @@ fn changed_asset_paths(home: &std::path::Path, changed: &[std::path::PathBuf]) -
             if name.starts_with('.') || name == "node_modules" { continue; }
             let child = path.join(&*name);
             let Ok(kind) = entry.file_type() else { continue };
-            if kind.is_dir() {
-                pending.push(child);
+            if kind.is_dir() || (kind.is_symlink() && entry.path().is_dir()) {
+                pending.push((child, ancestors.clone()));
             } else if paths.len() < MAX_FILES {
                 paths.insert(child);
             } else {
@@ -5079,6 +5082,23 @@ mod tests {
         assert_eq!(paths.iter().filter(|p| p.ends_with("icon.svg")).count(), 1);
         std::fs::remove_dir_all(&home).unwrap();
         assert_eq!(super::changed_asset_paths(&home, &changed), changed);
+    }
+
+    #[test]
+    fn linked_mod_directory_events_invalidate_each_alias_and_stop_cycles() {
+        use crate::linked_mods::tests::{sandbox, link};
+        let root = sandbox("invalidation");
+        let home = root.join("home");
+        let target = root.join("external/mod");
+        std::fs::write(target.join("icon.svg"), "svg").unwrap();
+        link(&target, &home.join("mods/one"));
+        link(&target, &home.join("mods/two"));
+        link(&target, &target.join("cycle"));
+        let paths = super::changed_asset_paths(&home, &["mods/one".into(), "mods/two".into()]);
+        assert!(paths.contains(&"mods/one/icon.svg".into()));
+        assert!(paths.contains(&"mods/two/icon.svg".into()));
+        assert!(!paths.iter().any(|p| p.to_string_lossy().contains("cycle")));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
