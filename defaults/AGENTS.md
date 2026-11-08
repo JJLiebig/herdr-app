@@ -655,7 +655,11 @@ What's about the user, never a look:
 - `sounds`: `{ "enabled": true, "done": "<file>", "blocked": "<file>" }`.
   When an agent needs the person, or finishes while they aren't looking at
   it, Herdr plays a sound and (unless they're looking) posts a toast that
-  goes there when clicked. `done` / `blocked` replace the bundled MP3s
+  goes there when clicked. A top-level agent's completion waits while any
+  descendant is working, then for about three seconds of team quiet. If the
+  parent resumes working, that held alert is canceled. Looking at delivery
+  suppresses its toast, but not its sound. Blocked alerts stay immediate;
+  sub-agents never alert themselves. `done` / `blocked` replace the bundled MP3s
   (path absolute or relative to `~/.config/herdr-app`). Changes apply live,
   including the Play buttons in Settings > Alerts.
 - `core`: the herdr-core binary to use, when it isn't where Herdr looks

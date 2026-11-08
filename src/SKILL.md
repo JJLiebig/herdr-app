@@ -95,6 +95,11 @@ worker. Use app commands when the
 user wants to see a new tab or split, hc for orchestration that need not change
 the screen.
 
+A top-level agent's completion alert waits while any descendant is working,
+then for about three seconds of team quiet. If the parent resumes working,
+the held alert is canceled. Looking when it fires suppresses the toast, but
+not the sound. Blocked alerts stay immediate; sub-agents never alert themselves.
+
 ## Customize layouts, keys, or mods
 
 First read `~/.config/herdr-app/AGENTS.md` (or `$HERDR_APP_HOME/AGENTS.md` if
