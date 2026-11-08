@@ -5,9 +5,14 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 /// A held completion waits for workers, then for a quiet team interval.
-enum Held {
+enum Phase {
     WorkingDescendants,
     QuietSince(Instant),
+}
+
+struct Held {
+    completion_turn: u64,
+    phase: Phase,
 }
 
 #[derive(Default)]
@@ -32,6 +37,11 @@ impl TeamAlerts {
         let working_roots: HashSet<String> = live.iter()
             .filter(|(_, rec)| rec["status"].as_str() == Some("working"))
             .map(|(addr, _)| root_agent(live, addr)).collect();
+        // Turn counters retain short working bursts coalesced between ticks.
+        let active_roots: HashSet<String> = live.iter()
+            .filter(|(addr, rec)| rec["parent"].as_str().is_some_and(|p| !p.is_empty())
+                && rec["turn"].as_u64().unwrap_or(0) > model.agents.get(*addr).map_or(0, |a| a.turn))
+            .map(|(addr, _)| root_agent(live, addr)).collect();
         let mut alerts = Vec::new();
         for (addr, rec) in live {
             let word = rec["status"].as_str();
@@ -43,7 +53,10 @@ impl TeamAlerts {
             let looking = visible.contains(addr);
             let prev = model.agents.get(addr).and_then(|a| a.word.as_deref());
             // A held finish uses attention at delivery; ordinary finishes keep Herdr's rule.
-            let transition = model.alert_for(addr, false, prev, word, false);
+            let turn = rec["turn"].as_u64().unwrap_or(0);
+            let resumed = self.held.get(addr).is_some_and(|h| turn > h.completion_turn);
+            if resumed { self.held.remove(addr); }
+            let transition = model.alert_for(addr, false, if resumed { Some("working") } else { prev }, word, false);
             if matches!(word, None | Some("working" | "blocked" | "error")) {
                 self.held.remove(addr);
                 if transition == Some(Alert::Blocked) {
@@ -53,11 +66,13 @@ impl TeamAlerts {
             }
             if let Some(held) = self.held.get_mut(addr) {
                 if working_roots.contains(addr) {
-                    *held = Held::WorkingDescendants;
+                    held.phase = Phase::WorkingDescendants;
+                } else if active_roots.contains(addr) {
+                    held.phase = Phase::QuietSince(now);
                 } else {
-                    match held {
-                        Held::WorkingDescendants => *held = Held::QuietSince(now),
-                        Held::QuietSince(since) if now.duration_since(*since) >= Duration::from_secs(3) => {
+                    match &held.phase {
+                        Phase::WorkingDescendants => held.phase = Phase::QuietSince(now),
+                        Phase::QuietSince(since) if now.duration_since(*since) >= Duration::from_secs(3) => {
                             self.held.remove(addr);
                             alerts.push((addr.clone(), Alert::Done, looking));
                         }
@@ -66,7 +81,12 @@ impl TeamAlerts {
                 }
             } else if transition == Some(Alert::Done) {
                 if working_roots.contains(addr) {
-                    self.held.insert(addr.clone(), Held::WorkingDescendants);
+                    // Core emits done and its turn increment separately. Account
+                    // for that original increment before detecting resumed work.
+                    let completion_turn = if !resumed && prev == Some("working") {
+                        turn.max(model.agents.get(addr).map_or(0, |a| a.turn).saturating_add(1))
+                    } else { turn };
+                    self.held.insert(addr.clone(), Held { completion_turn, phase: Phase::WorkingDescendants });
                 } else if !looking {
                     alerts.push((addr.clone(), Alert::Done, false));
                 }
@@ -98,7 +118,10 @@ mod tests {
             t
         }
         fn set(&mut self, addr: &str, word: &str, parent: Option<&str>) {
-            self.live.insert(addr.into(), json!({"status": word, "parent": parent}));
+            let old = self.live.get(addr);
+            let turn = old.and_then(|r| r["turn"].as_u64()).unwrap_or(0)
+                + u64::from(old.is_some_and(|r| r["status"] == "working") && word != "working");
+            self.live.insert(addr.into(), json!({"status": word, "parent": parent, "turn": turn}));
         }
         fn tick(&mut self, ms: u64, looking: bool) -> Vec<(String, Alert, bool)> {
             self.now += Duration::from_millis(ms);
@@ -106,6 +129,7 @@ mod tests {
             let result = self.alerts.poll(&self.model, &self.live, &visible, self.now);
             for (addr, rec) in &self.live {
                 self.model.set_word(addr, rec["status"].as_str().map(str::to_owned), None, looking);
+                self.model.set_turn(addr, rec["turn"].as_u64().unwrap_or(0), None);
             }
             result
         }
@@ -187,5 +211,56 @@ mod tests {
             t.set("remote/t2", "idle", Some("remote/t1"));
             assert!(t.tick(5000, false).is_empty());
         }
+    }
+    #[test]
+    fn coalesced_nested_worker_turn_restarts_quiet() {
+        let mut t = Team::new();
+        t.set("remote/t2", "idle", Some("remote/t1"));
+        t.set("remote/t3", "working", Some("remote/t2"));
+        t.set("remote/t1", "done", None);
+        assert!(t.tick(0, false).is_empty());
+        t.set("remote/t3", "done", Some("remote/t2"));
+        assert!(t.tick(0, false).is_empty());
+        t.set("remote/t3", "working", Some("remote/t2"));
+        t.set("remote/t3", "done", Some("remote/t2"));
+        assert!(t.tick(3000, false).is_empty());
+        assert!(t.tick(2999, false).is_empty());
+        assert_eq!(t.tick(1, false), [("remote/t1".into(), Alert::Done, false)]);
+    }
+    #[test]
+    fn coalesced_parent_turn_cancels_and_rejudges_without_affecting_unheld_alerts() {
+        for child_working in [false, true] {
+            let mut t = Team::new();
+            t.set("remote/t2", "working", Some("remote/t1"));
+            t.set("remote/t1", "done", None);
+            assert!(t.tick(0, false).is_empty());
+            if !child_working { t.set("remote/t2", "done", Some("remote/t1")); }
+            assert!(t.tick(0, false).is_empty());
+            t.set("remote/t1", "working", None);
+            t.set("remote/t1", "done", None);
+            assert!(t.tick(3000, true).is_empty());
+            if child_working {
+                t.set("remote/t2", "done", Some("remote/t1"));
+                assert!(t.tick(0, false).is_empty());
+                assert_eq!(t.tick(3000, false), [("remote/t1".into(), Alert::Done, false)]);
+            }
+            assert!(t.tick(5000, false).is_empty());
+            t.set("remote/t1", "working", None);
+            t.set("remote/t1", "done", None);
+            assert!(t.tick(0, false).is_empty());
+        }
+    }
+    #[test]
+    fn delayed_original_completion_turn_does_not_cancel_hold() {
+        let mut t = Team::new();
+        t.set("remote/t2", "working", Some("remote/t1"));
+        t.set("remote/t1", "done", None);
+        t.live.get_mut("remote/t1").unwrap()["turn"] = json!(0);
+        assert!(t.tick(0, true).is_empty());
+        t.live.get_mut("remote/t1").unwrap()["turn"] = json!(1);
+        assert!(t.tick(1000, true).is_empty());
+        t.set("remote/t2", "done", Some("remote/t1"));
+        assert!(t.tick(0, true).is_empty());
+        assert_eq!(t.tick(3000, true), [("remote/t1".into(), Alert::Done, true)]);
     }
 }
