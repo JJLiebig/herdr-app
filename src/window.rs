@@ -11,6 +11,7 @@ mod movable;
 mod pane_drag;
 mod pane_size;
 mod titlebar;
+mod team_alerts;
 
 use crate::layout::{Axis, Background as Paint, Content, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Size as Span};
 use crate::model::{self, Tab, Model};
@@ -404,6 +405,7 @@ pub struct AppWindow {
     written_seen: HashMap<String, u64>,
     /// Agents the person is looking at, and the turn they were shared as seen at.
     looked: HashMap<String, u64>,
+    team_alerts: team_alerts::TeamAlerts,
     watched: Watched,
     /// Core's terminal records by address.
     live: HashMap<String, Value>,
@@ -503,6 +505,7 @@ impl AppWindow {
             written_where: HashMap::new(),
             written_seen: HashMap::new(),
             looked: HashMap::new(),
+            team_alerts: team_alerts::TeamAlerts::default(),
             watched: Watched::default(),
             live: HashMap::new(),
             listed_once: false,
@@ -1372,15 +1375,7 @@ impl AppWindow {
 
     /// The parent chain's top: the agent a sub-agent belongs to in the agent order.
     fn root_agent(&self, addr: &str) -> String {
-        let mut cur = addr.to_owned();
-        for _ in 0..32 {
-            let parent = self.live.get(&cur).and_then(|r| r.get("parent")).and_then(Value::as_str);
-            match parent {
-                Some(p) if self.live.contains_key(p) => cur = p.to_owned(),
-                _ => break,
-            }
-        }
-        cur
+        team_alerts::root_agent(&self.live, addr)
     }
 
     /// Creates what's visible, drops what isn't, publishes state, saves, focuses.
@@ -2041,16 +2036,16 @@ impl AppWindow {
         // listing is ours, and must ring.
         let mut changed = self.reconcile(window, cx);
         let visible: HashSet<String> = self.visible_addresses().into_iter().collect();
-        let mut alerts = Vec::new();
+        // Poll before updating words, so transitions and the complete live team
+        // are observed together. Never arm completions from the startup listing.
+        let looking = if self.window_active { visible.clone() } else { HashSet::new() };
+        let alerts = if self.listed_once {
+            self.team_alerts.poll(&self.model, &self.live, &looking, Instant::now())
+        } else { Vec::new() };
         for (addr, rec) in &self.live {
             let word = rec.get("status").and_then(Value::as_str).map(str::to_owned);
             let app = rec.get("report").and_then(|r| r.get("app")).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
             let looking = visible.contains(addr) && self.window_active;
-            let prev = self.model.agents.get(addr).and_then(|a| a.word.clone());
-            let child = rec.get("parent").and_then(Value::as_str).is_some_and(|p| !p.is_empty());
-            if let Some(alert) = self.model.alert_for(addr, child, prev.as_deref(), word.as_deref(), looking) {
-                alerts.push((addr.clone(), alert, looking));
-            }
             changed |= self.model.set_word(addr, word, app, looking);
             let turn = rec.get("turn").and_then(Value::as_u64).unwrap_or(0);
             let label = rec.pointer("/labels/herdr.seen").and_then(Value::as_str).and_then(|s| s.parse::<u64>().ok());
