@@ -446,7 +446,7 @@ pub struct AppWindow {
     /// The system's appearance; a layout with a light and a dark theme follows it.
     system_dark: bool,
     /// The OS tells us when files change (`files.rs`); else the disk is polled.
-    file_events: Option<async_channel::Receiver<crate::files::Changed>>,
+    file_events: Option<crate::files::FileEvents>,
     polls: u64,
     /// The downloaded update the frame's pill offers, and the one closed for now.
     /// What's waiting, in words (`update_label`).
@@ -466,6 +466,10 @@ pub struct AppWindow {
 impl AppWindow {
     pub fn new(core: Arc<Core>, requests: async_channel::Receiver<Request>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let runtime = ShellRuntime::new(cx).map_err(|e| tracing::error!("script runtime failed, mods are off: {e:#}")).ok();
+        let file_events = crate::files::watch(&mods::app_dir(), #[cfg(test)] cx.background_executor().clone());
+        if let (Some(runtime), Some(events)) = (&runtime, &file_events) {
+            runtime.set_source_revision_provider(events.revision_provider());
+        }
         mods::note_fonts(cx);
         let seen = std::fs::read_to_string(file("seen.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let mut w = AppWindow {
@@ -536,7 +540,7 @@ impl AppWindow {
             pane_history: Vec::new(),
             window_active: true,
             system_dark: is_dark(window.appearance()),
-            file_events: crate::files::watch(&mods::app_dir(), #[cfg(test)] cx.background_executor().clone()),
+            file_events,
             polls: 0,
             update_ready: None,
             update_dismissed: None,
@@ -596,10 +600,10 @@ impl AppWindow {
         }));
         if let Some(events) = w.file_events.clone() {
             w._tasks.push(cx.spawn_in(window, async move |this, cx| {
-                while let Ok(mut changed) = events.recv().await {
+                while let Ok(mut changed) = events.changes.recv().await {
                     // An editor's save is several events: take them together.
                     cx.background_executor().timer(Duration::from_millis(80)).await;
-                    while let Ok(more) = events.try_recv() {
+                    while let Ok(more) = events.changes.try_recv() {
                         changed.extend(more);
                     }
                     if this.update_in(cx, |this, window, cx| this.files_changed(changed, window, cx)).is_err() {
@@ -3884,10 +3888,7 @@ impl AppWindow {
         if changed.iter().any(|p| top(p) == "layouts") {
             self.check_layout_file(window, cx);
         }
-        let mut edited: BTreeSet<String> = changed.iter().filter_map(|p| crate::files::mod_of(p)).collect();
-        if changed.iter().any(|p| p == std::path::Path::new("mods")) {
-            edited.extend(self.folders.keys().cloned());
-        }
+        let edited: BTreeSet<String> = changed.iter().filter_map(|p| crate::files::mod_of(p)).collect();
         if edited.is_empty() {
             return;
         }

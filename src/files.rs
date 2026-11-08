@@ -5,15 +5,85 @@
 use notify::{RecursiveMode, Watcher as _};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// What changed, relative to the home folder.
 pub type Changed = Vec<PathBuf>;
 
+#[derive(Clone)]
+pub struct FileEvents {
+    pub changes: async_channel::Receiver<Changed>,
+    root: PathBuf,
+    revisions: Arc<Mutex<Revisions>>,
+}
+
+#[derive(Default)]
+struct Revisions {
+    next: u64,
+    all: u64,
+    roots: std::collections::BTreeMap<PathBuf, u64>,
+}
+
+impl Revisions {
+    fn changed(&mut self, changed: &Changed, rescan: bool) {
+        if rescan {
+            self.next += 1;
+            self.all = self.next;
+        }
+        for root in changed.iter().filter_map(|path| mod_of(path).map(|name| PathBuf::from("mods").join(name))).collect::<HashSet<_>>() {
+            self.next += 1;
+            self.roots.insert(root, self.next);
+        }
+    }
+}
+
+impl FileEvents {
+    pub fn revision_provider(&self) -> impl Fn(&Path) -> Option<u64> + 'static {
+        let base = self.root.clone();
+        let revisions = self.revisions.clone();
+        move |root| {
+            let mut revisions = revisions.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let all = revisions.all;
+            let direct = root.strip_prefix(&base).ok().filter(|relative| {
+                relative.components().count() == 2 && relative.starts_with("mods")
+            });
+            let mut revision = direct.map(|relative| *revisions.roots.entry(relative.to_path_buf()).or_insert(all));
+            // Installed aliases share the canonical runtime cache, including
+            // escaping assets and edits made with no copy open.
+            for (alias, value) in &revisions.roots {
+                if base.join(alias).canonicalize().is_ok_and(|target| target == root) {
+                    revision = Some(revision.unwrap_or(all).max(*value));
+                }
+            }
+            revision.map(|value| value.max(all))
+        }
+    }
+}
+
+pub(crate) fn changes(base: &Path, event: &notify::Result<notify::Event>) -> (Changed, bool) {
+    let Ok(event) = event else { return (Vec::new(), true) };
+    if !event.need_rescan() && matches!(event.kind, notify::EventKind::Access(_)) {
+        return (Vec::new(), false);
+    }
+    let rescan = event.need_rescan() || event.paths.iter().any(|path| {
+        base.starts_with(path) || path.strip_prefix(base).is_ok_and(|relative| relative.starts_with("mods") && mod_of(relative).is_none())
+    });
+    let changed = event.paths.iter().filter_map(|path| path.strip_prefix(base).ok())
+        .filter(|path| watched(path)).map(Path::to_path_buf).collect();
+    (changed, rescan)
+}
+
 /// Starts watching `home`; None if the OS watcher can't start (the app then
 /// polls as before).
-pub fn watch(home: &Path, #[cfg(test)] executor: gpui::BackgroundExecutor) -> Option<async_channel::Receiver<Changed>> {
-    crate::linked_files::watch(home, #[cfg(test)] executor)
+pub fn watch(home: &Path, #[cfg(test)] executor: gpui::BackgroundExecutor) -> Option<FileEvents> {
+    let root = home.canonicalize().ok()?;
+    let revisions = Arc::new(Mutex::new(Revisions::default()));
+    let state = revisions.clone();
+    let record = move |changed: &Changed, rescan| {
+        state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).changed(changed, rescan);
+    };
+    let changes = crate::linked_files::watch(&root, record, #[cfg(test)] executor)?;
+    Some(FileEvents { changes, root, revisions })
 }
 
 // Native callbacks cannot wake GPUI's deterministic test scheduler directly.
@@ -49,11 +119,10 @@ pub(crate) fn watched(rel: &Path) -> bool {
 /// typings and jsconfig into each mod on load, and editors drop hidden and
 /// backup files: none of those are the mod's code.
 fn mod_file_counts(rest: std::path::Components) -> bool {
-    let parts: Vec<&str> = rest.filter_map(|c| c.as_os_str().to_str()).collect();
-    if parts.iter().any(|p| p.starts_with('.') || p.ends_with('~') || *p == "node_modules") {
-        return false;
-    }
-    !matches!(parts.as_slice(), [_, "jsconfig.json"] | [_, .., "gpui-kit.d.ts"])
+    let mut rest = rest;
+    let Some(name) = rest.next() else { return true };
+    gpui_shell::application_file_counts(Path::new(name.as_os_str()))
+        && gpui_shell::application_file_counts(rest.as_path())
 }
 
 /// Folders mods watch (`watchFolder`): one OS watcher each, shared by every
@@ -337,6 +406,105 @@ pub fn mod_of(rel: &Path) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn source_revisions_survive_closed_copies_and_rescan_invalidates_all() {
+        let (_, changes) = async_channel::unbounded();
+        let events = FileEvents {
+            changes,
+            root: PathBuf::from("/home/probe"),
+            revisions: Default::default(),
+        };
+        let revision = events.revision_provider();
+        let first = Path::new("/home/probe/mods/one");
+        let other = Path::new("/home/probe/mods/other");
+        assert_eq!(revision(first), Some(0));
+        assert_eq!(revision(other), Some(0));
+        events.revisions.lock().unwrap().changed(&vec!["mods/one/main.js".into()], false);
+        assert_eq!(revision(first), Some(1));
+        assert_eq!(revision(other), Some(0));
+        // No copy registration is needed for a root edited while closed.
+        events.revisions.lock().unwrap().changed(&vec!["mods/closed/main.js".into()], false);
+        assert_eq!(revision(Path::new("/home/probe/mods/closed")), Some(2));
+        let changed = Vec::new();
+        events.revisions.lock().unwrap().changed(&changed, true);
+        assert!(revision(first).unwrap() > 2);
+        assert!(revision(other).unwrap() > 2);
+        assert!(changed.is_empty(), "a rescan must not request mod hot reloads");
+        assert_eq!(revision(Path::new("/outside")), None);
+        let linked = crate::linked_mods::tests::sandbox("canonical-revision");
+        let home = linked.join("home");
+        let target = linked.join("external/mod");
+        crate::linked_mods::tests::link(&target, &home.join("mods/alias"));
+        let events = FileEvents { root: home.canonicalize().unwrap(), ..events };
+        let revision = events.revision_provider();
+        events.revisions.lock().unwrap().changed(&vec!["mods/alias/icon.svg".into()], false);
+        let before = revision(&target.canonicalize().unwrap()).unwrap();
+        events.revisions.lock().unwrap().changed(&Vec::new(), true);
+        assert!(revision(&target.canonicalize().unwrap()).unwrap() > before);
+        std::fs::remove_dir_all(linked).unwrap();
+    }
+
+    #[test]
+    fn unattributed_events_revalidate_code_without_reloading_mods() {
+        let base = Path::new("/home/probe");
+        let mut paths = vec![base.to_path_buf(), base.join("mods"), base.parent().unwrap().to_path_buf()];
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            paths.push(base.join("mods").join(std::ffi::OsString::from_vec(vec![0xff])));
+        }
+        let mut events: Vec<notify::Result<notify::Event>> = paths.into_iter()
+            .map(|path| Ok(notify::Event::new(notify::EventKind::Any).add_path(path))).collect();
+        events.push(Err(notify::Error::generic("missed events")));
+        events.push(Ok(notify::Event::new(notify::EventKind::Any).set_flag(notify::event::Flag::Rescan)));
+        for event in events {
+            let mut revisions = Revisions::default();
+            revisions.roots.insert("mods/one".into(), 0);
+            revisions.roots.insert("mods/two".into(), 0);
+            let (changed, rescan) = changes(base, &event);
+            revisions.changed(&changed, rescan);
+            assert!(revisions.all > 0);
+            assert!(!changed.contains(&PathBuf::from("mods/one")));
+            assert!(!changed.contains(&PathBuf::from("mods/two")));
+        }
+    }
+
+    #[test]
+    fn rescan_keeps_real_edits_without_reloading_other_mods() {
+        let base = Path::new("/home/probe");
+        let mut revisions = Revisions::default();
+        revisions.roots.insert("mods/one".into(), 0);
+        revisions.roots.insert("mods/two".into(), 0);
+        let event = notify::Event::new(notify::EventKind::Any)
+            .set_flag(notify::event::Flag::Rescan)
+            .add_path(base.join("mods/one/main.js"));
+        let (changed, rescan) = changes(base, &Ok(event));
+        revisions.changed(&changed, rescan);
+        assert_eq!(changed, vec![PathBuf::from("mods/one/main.js")]);
+        assert!(revisions.all > 0);
+        assert!(revisions.roots[Path::new("mods/one")] > revisions.all);
+        assert_eq!(revisions.roots[Path::new("mods/two")], 0);
+    }
+
+    #[test]
+    fn revision_provider_does_not_keep_receiver_alive_and_recovers_poison() {
+        let (tx, changes) = async_channel::unbounded();
+        let events = FileEvents {
+            changes,
+            root: PathBuf::from("/home/probe"),
+            revisions: Default::default(),
+        };
+        let revision = events.revision_provider();
+        let state = events.revisions.clone();
+        drop(events);
+        assert!(tx.is_closed());
+        assert!(std::panic::catch_unwind(|| {
+            let _lock = state.lock().unwrap();
+            panic!("poison revision state");
+        }).is_err());
+        assert_eq!(revision(Path::new("/home/probe/mods/one")), Some(0));
+    }
+
     #[gpui::test]
     fn native_notifications_reach_a_waiting_test_receiver(cx: &mut gpui::TestAppContext) {
         let (tx, rx) = async_channel::unbounded();
@@ -370,6 +538,7 @@ mod tests {
     fn files_the_runtime_or_an_editor_writes_into_a_mod_do_not_reload_it() {
         assert!(watched(Path::new("mods/probe")));
         assert!(watched(Path::new("mods/probe/ui.js")));
+        assert!(watched(Path::new("mods/probe/target/output.js")));
         assert!(watched(Path::new("mods/probe/lib/jsconfig.json")));
         assert!(!watched(Path::new("mods/probe/jsconfig.json")));
         assert!(!watched(Path::new("mods/probe/gpui-kit.d.ts")));
