@@ -2128,7 +2128,10 @@ impl AppWindow {
         if QUITTING.load(std::sync::atomic::Ordering::SeqCst) {
             return false;
         }
+        // Layout terminal blocks too: one whose program ended while its stream was
+        // down goes as a pane does.
         let missing = self.model.tabs().flat_map(|c| c.root.terminals())
+            .chain(self.chrome.terminals())
             .filter_map(|n| n.terminal().filter(|a| !self.live.contains_key(*a) && !self.just_born(a)).map(|a| (n.id.clone(), a.to_owned())))
             .collect::<Vec<_>>();
         if !missing.is_empty() && !self.checking_closed {
@@ -2524,10 +2527,13 @@ impl AppWindow {
                 this.checking_closed = false;
                 if generation != this.core_generation { return; }
                 let mut changed = false;
-                for (pane, addr) in closed {
-                    if this.model.address_of(&pane).as_deref() == Some(&addr) {
+                for (block, addr) in closed {
+                    if this.model.address_of(&block).as_deref() == Some(&addr) {
                         this.notify_launch_failure(&addr, window, cx);
-                        this.model.remove_pane(&pane);
+                        this.model.remove_pane(&block);
+                        changed = true;
+                    } else if this.chrome.find(&block).and_then(|n| n.terminal()) == Some(addr.as_str()) {
+                        this.chrome.remove_slot(&block);
                         changed = true;
                     }
                 }
