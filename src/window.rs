@@ -2300,21 +2300,24 @@ impl AppWindow {
             let id = o.id.clone();
             return self.close_overlay(&id, window, cx);
         }
+        // How its stream ended (`hc run --rm` leaves no record). The program ended on
+        // its own (or was killed): its pane or layout block goes now. A stream that
+        // just broke (the core restarted, a machine's link dropped) says neither, and
+        // its view attaches again when the connection is back.
+        let closed = self.terms.get(block).and_then(|t| t.view.read(cx).ended.clone())
+            .is_some_and(|why| matches!(why.as_str(), "exited" | "killed" | "finished"));
+        if !closed {
+            return;
+        }
         if self.chrome.find(block).is_some_and(|n| n.terminal().is_some()) {
             self.chrome.remove_slot(block);
-            self.sync(window, cx);
+            return self.sync(window, cx);
         }
-        // How its stream ended, for `reconcile` (`hc run --rm` leaves no record).
         if let Some(t) = self.terms.get(block)
-            && let Some(why) = t.view.read(cx).ended.clone()
+            && self.model.address_of(block).as_deref() == Some(t.address.as_str())
         {
-            // The program ended on its own (or was killed): its pane goes now. A
-            // stream that just broke (the core died) says neither.
-            let closed = matches!(why.as_str(), "exited" | "killed" | "finished");
-            if closed && self.model.address_of(block).as_deref() == Some(t.address.as_str()) {
-                self.model.remove_pane(block);
-                return self.sync(window, cx);
-            }
+            self.model.remove_pane(block);
+            return self.sync(window, cx);
         }
         // Otherwise the next listing checks closure; core owns lost terminals.
     }
@@ -5418,6 +5421,45 @@ mod tests {
         assert!(!pane_focused(cx), "hidden, the pane can't hold the keyboard");
         select("main", cx);
         assert!(pane_focused(cx));
+    }
+
+    #[test]
+    fn layout_terminal_blocks_stay_until_their_program_ends() {
+        in_own_process("layout_terminal_block_ends");
+    }
+
+    /// A terminal block in the layout (a composition) keeps its place when its
+    /// stream breaks (a core restart, a dropped machine link), and goes only once
+    /// the program itself has ended, as a pane does.
+    #[gpui::test]
+    fn layout_terminal_block_ends(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("layout_terminal_block_ends") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "header", "", json!({
+            "id": "root", "type": "row", "children": [
+                { "id": "main", "type": "block", "content": { "tab": "active" } },
+                { "id": "slot", "type": "column", "children": [
+                    { "id": "slot-header", "type": "block", "content": { "mod": "header" } },
+                    { "id": "slot-terminal", "type": "block", "content": { "terminal": "t1" } }
+                ] }
+            ]
+        }));
+        cx.run_until_parked();
+        let end = |why: &str, cx: &mut gpui::VisualTestContext| cx.update(|window, cx| view.update(cx, |this, cx| {
+            let block = this.terms.get("slot-terminal").expect("the block's terminal view").view.clone();
+            block.update(cx, |v, _| v.ended = Some(why.into()));
+            this.terminal_ended("slot-terminal", window, cx);
+        }));
+        let shown = |cx: &mut gpui::VisualTestContext| cx.update(|_, cx| view.read(cx).chrome.find("slot-terminal").is_some());
+        for why in ["ended", "holder_lost", "server_stop", "stopped_by_restart"] {
+            end(why, cx);
+            assert!(shown(cx), "a stream that ended with {why:?} keeps its block");
+        }
+        end("exited", cx);
+        assert!(!shown(cx), "an exited program's block goes");
+        assert!(cx.update(|_, cx| view.read(cx).chrome.find("slot-header").is_some()), "its neighbors stay");
     }
 
     #[test]
