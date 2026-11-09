@@ -136,7 +136,6 @@ use gpui_base::{
 };
 
 mod components;
-pub(crate) mod image;
 mod text_view;
 
 use crate::{
@@ -1487,7 +1486,11 @@ fn materialize_component(
         Component::Image(path) => {
             warn_unhonoured_a11y(&behavior, "image", &[]);
             // HERDR: animated images need an identity to retain their frame state.
-            let mut image = gpui::img(image::source(&path)).id(element_id(id, behavior.key.clone()));
+            let mut source = gpui::ImageSource::from(path);
+            if let gpui::ImageSource::Resource(gpui::Resource::Embedded(path)) = &mut source {
+                *path = crate::AppAssets::cache_key(path);
+            }
+            let mut image = gpui::img(source).id(element_id(id, behavior.key.clone()));
             image.style().refine(&refinement);
             image.into_any_element()
         }

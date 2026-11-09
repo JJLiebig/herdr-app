@@ -1254,7 +1254,7 @@ fn load_view_with_policy(
     loaded
 }
 
-// HERDR: retain a loaded JS view for description and native rendering checks.
+// HERDR: describe the same loaded JS view repeatedly without native materialization.
 #[cfg(feature = "render-test-support")]
 pub struct DescriptionSession {
     runtime: Rc<ShellRuntime>,
@@ -1264,14 +1264,6 @@ pub struct DescriptionSession {
 
 #[cfg(feature = "render-test-support")]
 impl DescriptionSession {
-    pub fn view(&self) -> &Entity<ScriptView> {
-        &self.view
-    }
-
-    pub fn loaded_images(&self, window: &Window, cx: &App) -> Vec<std::sync::Arc<gpui::RenderImage>> {
-        crate::materialize::image::loaded(window, cx)
-    }
-
     pub fn load(
         runtime: Rc<ShellRuntime>,
         root: impl AsRef<Path>,
