@@ -21,8 +21,12 @@ function find(root: Element, id: string): Element | undefined {
   for (const child of root?.nodes ?? []) { const found = find(child, id); if (found) return found; }
 }
 
-test.each([null, "remote"])("cached agents wait for recovery config after switching from %s", async initialMachine => {
-  const agent = { key: "claude", name: "Claude", installed: true, run: ["claude"], icon: "claude.svg" };
+test.each([
+  ["from local", null, false],
+  ["from remote", "remote", false],
+  ["after an agent check fails", null, true],
+] as const)("cached agents use recovery config %s", async (_scenario, initialMachine, checkFails) => {
+  const agent = { key: "claude", name: "Claude", installed: !checkFails, run: ["claude"], icon: "claude.svg" };
   let release!: (value: string | null) => void;
   const pending = new Promise<string | null>(resolve => { release = resolve; });
   const launches: any[] = [], tasks: Promise<void>[] = [];
@@ -31,7 +35,11 @@ test.each([null, "remote"])("cached agents wait for recovery config after switch
   const values: Record<string, any> = {
     View: class {}, div: element, svg: element, image: element, h_flex: element, v_flex: element,
     theme: () => ({}), spaces: () => [{ id: "space", active: true, machine }], panes: () => [], keys: () => [],
-    knownAgents: async () => [agent], shared: () => ({ "": [agent], remote: [agent] }), setShared() {},
+    knownAgents: async () => {
+      if (checkFails) throw Error("shell failed");
+      return [agent];
+    },
+    shared: () => ({ "": [agent], remote: [agent] }), setShared() {},
     run: (...args: any[]) => launches.push(args), openOverlay() {}, closeOverlay() {}, props: () => ({}),
     window: () => ({ platform: "windows" }), appHome: () => "/home", readTextFile: () => pending,
   };
