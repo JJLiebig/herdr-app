@@ -12,6 +12,7 @@ mod pane_drag;
 mod pane_size;
 mod titlebar;
 mod team_alerts;
+mod nav_history;
 
 use crate::layout::{Axis, Background as Paint, Content, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Size as Span};
 use crate::model::{self, Tab, Model};
@@ -442,6 +443,7 @@ pub struct AppWindow {
     /// Whether the last sync showed the tab, to hand it the keyboard back when a stack shows it again.
     tab_shown: bool,
     pane_history: Vec<String>,
+    nav: nav_history::NavHistory,
     window_active: bool,
     /// The system's appearance; a layout with a light and a dark theme follows it.
     system_dark: bool,
@@ -538,6 +540,7 @@ impl AppWindow {
             window_terminal: None,
             tab_shown: true,
             pane_history: Vec::new(),
+            nav: Default::default(),
             window_active: true,
             system_dark: is_dark(window.appearance()),
             file_events,
@@ -1487,6 +1490,9 @@ impl AppWindow {
         });
         if let Some(id) = self.focused_block.as_ref().or(model_pane.as_ref()) {
             remember_pane(&mut self.pane_history, id);
+        }
+        if let Some(id) = &model_pane {
+            self.nav.visit(id);
         }
         self.synced_model_pane = model_pane;
         self.focused_pane = focused.clone();
@@ -3229,6 +3235,11 @@ impl AppWindow {
                 let addr = order[next].clone();
                 self.focus_agent(&addr);
             }
+            "nav.back" | "nav.forward" => {
+                let model = &self.model;
+                let Some(pane) = self.nav.step(name == "nav.back", |p| model.tab_of(p).is_some()) else { return };
+                return self.dispatch("pane.focus", &json!({ "pane": pane }), person, window, cx);
+            }
             // ---- layout
             "layout.switch" => {
                 self.switch_layout(Self::arg(a, "name"), window, cx);
@@ -4129,9 +4140,10 @@ impl AppWindow {
                     let id = n.id.clone();
                     div()
                         .size_full()
-                        .on_any_mouse_down(cx.listener(move |this, _, _, cx| {
+                        .on_any_mouse_down(cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                             // Overlay terminals keep their own focus; chrome blocks share the pane focus API.
                             if this.focused_pane.as_deref() != Some(id.as_str())
+                                && !matches!(ev.button, MouseButton::Navigate(_))
                                 && (this.model.tab_of(&id).is_some() || terminal_block(&this.chrome, Some(&id)).is_some())
                             {
                                 this.model.focus_pane(&id);
@@ -4191,8 +4203,8 @@ impl AppWindow {
                 .key_context(format!("Mod mod = {}", inst.name).as_str())
                 .when(in_pane, |d| {
                     let id = slot.to_owned();
-                    d.on_any_mouse_down(cx.listener(move |this, _, _, cx| {
-                        if this.focused_pane.as_deref() != Some(id.as_str()) {
+                    d.on_any_mouse_down(cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                        if this.focused_pane.as_deref() != Some(id.as_str()) && !matches!(ev.button, MouseButton::Navigate(_)) {
                             this.model.focus_pane(&id);
                             this.focused_pane = Some(id.clone());
                             this.publish(cx);
@@ -4920,6 +4932,10 @@ impl Render for AppWindow {
             self.synced_model_pane = self.model.focused_pane();
             self.publish(cx);
         }
+        // Clicks focus panes without a sync (a terminal's scrollbar, a mod's control).
+        if let Some(p) = self.model.focused_pane() {
+            self.nav.visit(&p);
+        }
         self.tick_floats(window);
         self.apply_titlebar(window);
         if mods::publish_window(self.window_json(window)) {
@@ -4980,6 +4996,8 @@ impl Render for AppWindow {
                 }
             }))
             .capture_any_mouse_down(cx.listener(|this, ev: &MouseDownEvent, _, _| this.pointer = ev.position))
+            .on_mouse_down(MouseButton::Navigate(NavigationDirection::Back), cx.listener(|this, _, w, cx| this.run("nav.back", json!({}), w, cx)))
+            .on_mouse_down(MouseButton::Navigate(NavigationDirection::Forward), cx.listener(|this, _, w, cx| this.run("nav.forward", json!({}), w, cx)))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, window, cx| {
                 this.drag_window(ev, window);
                 if this.drag.is_none() {

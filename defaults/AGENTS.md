@@ -615,6 +615,9 @@ The main ones:
   Terminals display Kitty graphics, including Unicode placeholder images used by
   programs such as yazi; partial images and scrolling follow the placeholder cells.
 - Agents: `agent.next`, `agent.prev`, `agent.focus {terminal}`.
+- History: `nav.back`, `nav.forward` move through the panes this screen showed,
+  across tabs and spaces, like a browser; the mouse's back and forward buttons
+  run them. Closed panes are skipped.
 - Layout: `layout.switch {name?}`, `layout.toggle {id}`, `layout.show {id}`, `layout.hide {id}`,
   `layout.resize {id, px | weight}`, `layout.select {stack, child}`, `layout.set {layout}`
   (personal tree edits; on shipped layouts only click/look fields change),
