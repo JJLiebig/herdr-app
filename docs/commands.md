@@ -337,6 +337,18 @@ Show the previous agent.
 
 No arguments.
 
+## `nav.back`
+
+Go back to the pane shown before, in any tab or space, as a browser's back (also the mouse's back button).
+
+No arguments.
+
+## `nav.forward`
+
+Go forward again after nav.back (also the mouse's forward button).
+
+No arguments.
+
 ## `layout.switch`
 
 Show a layout (layouts/<name>.json), or the next one.
