@@ -4149,9 +4149,6 @@ impl AppWindow {
                                 this.model.focus_pane(&id);
                                 this.focused_pane = Some(id.clone());
                                 this.synced_model_pane = this.model.focused_pane();
-                                if let Some(p) = &this.synced_model_pane {
-                                    this.nav.visit(p);
-                                }
                                 this.publish(cx);
                                 this.save();
                                 cx.notify();
@@ -4210,7 +4207,6 @@ impl AppWindow {
                         if this.focused_pane.as_deref() != Some(id.as_str()) && !matches!(ev.button, MouseButton::Navigate(_)) {
                             this.model.focus_pane(&id);
                             this.focused_pane = Some(id.clone());
-                            this.nav.visit(&id);
                             this.publish(cx);
                             this.save();
                             cx.notify();
@@ -4935,6 +4931,10 @@ impl Render for AppWindow {
             self.focused_pane = Some(id);
             self.synced_model_pane = self.model.focused_pane();
             self.publish(cx);
+        }
+        // Clicks focus panes without a sync (a terminal's scrollbar, a mod's control).
+        if let Some(p) = self.model.focused_pane() {
+            self.nav.visit(&p);
         }
         self.tick_floats(window);
         self.apply_titlebar(window);
