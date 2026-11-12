@@ -4140,14 +4140,18 @@ impl AppWindow {
                     let id = n.id.clone();
                     div()
                         .size_full()
-                        .on_any_mouse_down(cx.listener(move |this, _, _, cx| {
+                        .on_any_mouse_down(cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                             // Overlay terminals keep their own focus; chrome blocks share the pane focus API.
                             if this.focused_pane.as_deref() != Some(id.as_str())
+                                && !matches!(ev.button, MouseButton::Navigate(_))
                                 && (this.model.tab_of(&id).is_some() || terminal_block(&this.chrome, Some(&id)).is_some())
                             {
                                 this.model.focus_pane(&id);
                                 this.focused_pane = Some(id.clone());
                                 this.synced_model_pane = this.model.focused_pane();
+                                if let Some(p) = &this.synced_model_pane {
+                                    this.nav.visit(p);
+                                }
                                 this.publish(cx);
                                 this.save();
                                 cx.notify();
@@ -4202,10 +4206,11 @@ impl AppWindow {
                 .key_context(format!("Mod mod = {}", inst.name).as_str())
                 .when(in_pane, |d| {
                     let id = slot.to_owned();
-                    d.on_any_mouse_down(cx.listener(move |this, _, _, cx| {
-                        if this.focused_pane.as_deref() != Some(id.as_str()) {
+                    d.on_any_mouse_down(cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                        if this.focused_pane.as_deref() != Some(id.as_str()) && !matches!(ev.button, MouseButton::Navigate(_)) {
                             this.model.focus_pane(&id);
                             this.focused_pane = Some(id.clone());
+                            this.nav.visit(&id);
                             this.publish(cx);
                             this.save();
                             cx.notify();
