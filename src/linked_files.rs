@@ -1,5 +1,6 @@
 //! Watches linked configuration targets and translates events back to home paths.
-use notify::{RecursiveMode, Watcher};
+use crate::files::HomeChanges;
+use notify::{EventKind, RecursiveMode, Watcher, event::ModifyKind};
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -127,7 +128,7 @@ fn record_discovery(previous: &Links, next: &Links, changed: &mut crate::files::
 
 /// Owns the OS watcher on a worker thread, so link changes can rebuild watches
 /// without locking inside notify's callback. The receiver owns its lifetime.
-pub fn watch(home: &Path, record: impl Fn(&crate::files::Changed, bool) + Clone + Send + 'static, #[cfg(test)] executor: gpui::BackgroundExecutor) -> Option<async_channel::Receiver<crate::files::Changed>> {
+pub fn watch(home: &Path, record: impl Fn(&crate::files::Changed, bool) + Clone + Send + 'static, #[cfg(test)] executor: gpui::BackgroundExecutor) -> Option<async_channel::Receiver<HomeChanges>> {
     let home = home.canonicalize().ok()?;
     let (tx, rx) = async_channel::unbounded();
     let (events_tx, events_rx) = std::sync::mpsc::channel();
@@ -149,9 +150,9 @@ pub fn watch(home: &Path, record: impl Fn(&crate::files::Changed, bool) + Clone 
             let home_changed = !changed.is_empty();
             if home_changed {
                 #[cfg(not(test))]
-                let _ = changes.send_blocking(changed);
+                let _ = changes.send_blocking(changed.into());
                 #[cfg(test)]
-                let _ = changes.send(changed);
+                let _ = changes.send(changed.into());
             }
             let _ = home_tx.send((event, home_changed));
         })
@@ -179,7 +180,7 @@ pub fn watch(home: &Path, record: impl Fn(&crate::files::Changed, bool) + Clone 
             if rescan || (home_changed || !changed.is_empty())
                 && !matches!(
                     event.as_ref().map(|e| e.kind).unwrap_or(notify::EventKind::Any),
-                    notify::EventKind::Modify(notify::event::ModifyKind::Data(_))
+                    EventKind::Modify(ModifyKind::Data(_))
                 )
             {
                 let next = links(&home);
@@ -206,10 +207,18 @@ pub fn watch(home: &Path, record: impl Fn(&crate::files::Changed, bool) + Clone 
             }
             record(&changed, rescan);
             if !changed.is_empty() {
+                // A concrete replacement may retain the file names, sizes and mtimes.
+                let replacement = event.as_ref().is_ok_and(|event| {
+                    !event.need_rescan() && !matches!(event.kind, EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Metadata(_)))
+                });
+                let replaced_links = if replacement {
+                    changed.iter().filter_map(|path| crate::files::mod_of(path)).collect()
+                } else { Default::default() };
+                let changes = HomeChanges { paths: changed, replaced_links };
                 #[cfg(not(test))]
-                let _ = tx.send_blocking(changed);
+                let _ = tx.send_blocking(changes);
                 #[cfg(test)]
-                let _ = notifications.send(changed);
+                let _ = notifications.send(changes);
             }
         }
     });
@@ -367,14 +376,14 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    fn wait(cx: &mut gpui::TestAppContext, rx: &async_channel::Receiver<crate::files::Changed>, expected: &[&str]) {
+    fn wait(cx: &mut gpui::TestAppContext, rx: &async_channel::Receiver<HomeChanges>, expected: &[&str]) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut remaining: HashSet<PathBuf> = expected.iter().map(PathBuf::from).collect();
         while !remaining.is_empty() {
             cx.executor().advance_clock(std::time::Duration::from_millis(20));
             cx.run_until_parked();
-            while let Ok(paths) = rx.try_recv() {
-                remaining.retain(|wanted| !paths.iter().any(|p| wanted.starts_with(p)));
+            while let Ok(changes) = rx.try_recv() {
+                remaining.retain(|wanted| !changes.paths.iter().any(|p| wanted.starts_with(p)));
             }
             assert!(
                 std::time::Instant::now() < deadline,
