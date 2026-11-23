@@ -55,7 +55,7 @@ impl AppWindow {
             .filter(|(_, r)| r.pointer("/labels/herdr.space").and_then(Value::as_str).is_none_or(str::is_empty))
             .map(|(a, _)| a.clone())
             .collect();
-        self.kill(&old, cx);
+        self.kill_tree(old, cx);
         Self::forget_ask();
         // In the person's shell, as tabs start agents (so their functions and
         // npm's shims run, and on macOS the login profile), but ending with it:
