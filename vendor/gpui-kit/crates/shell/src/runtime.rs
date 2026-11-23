@@ -529,6 +529,7 @@ pub fn error_banner(message: &str, window: &mut Window, cx: &mut App) -> AnyElem
         .top_0()
         .left_0()
         .right_0()
+        .occlude() // HERDR: the banner owns mouse input above the retained view.
         .flex()
         .flex_col()
         .bg(surface)
