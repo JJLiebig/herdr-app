@@ -575,7 +575,7 @@ Target IDs (`id`, `pane`, `space`, `terminal`) must be strings. Other non-null
 types are rejected before a current-target default applies; null means omitted.
 The main ones:
 
-- Spaces: `space.new {name?, folder?, tab?, argv?, task?, machine?, focus?}`
+- Spaces: `space.new {name?, folder?, tab?, terminal_name?, argv?, task?, machine?, focus?}`
   (machine: another machine from `hc machine ls`; omitted: the focused space's
   machine for keys and clicks, this computer for scripts; `""`: this computer.
   The space lives there, its tabs and splits stay there, and `spaces()` gives
@@ -585,7 +585,7 @@ The main ones:
   `space.close {id?, confirmed?}`, `space.rename {id?, name}` ("": Herdr's name again),
   `space.move {id, index}`, `space.select {index | id}`, `space.next`, `space.prev`.
   With no `argv`, the target core chooses that machine's default shell (PowerShell 7 when available on Windows).
-- Tabs: `tab.new {name?, space?, folder?, argv?, task?, focus?}` (argv: an
+- Tabs: `tab.new {name?, space?, folder?, terminal_name?, argv?, task?, focus?}` (argv: an
   agent to run, task: its first message). Agents run in your interactive
   shell (including fish), which stays open after the agent exits. A terminal
   that exits with a nonzero code within two seconds of launch shows an error
@@ -597,6 +597,10 @@ The main ones:
   `tab.select {index | id}`, `tab.next`, `tab.prev`,
   `tab.settle {id?}`, `tab.unsettle {id?}` (index, next and prev
   skip settled tabs).
+- `terminal_name` names the new terminal for `hc`. Use 1–32 characters from
+  `a-z`, `0-9`, `-`, `_` and `.`, starting with a letter or digit. Avoid names
+  shaped like terminal IDs such as `t7`. A name held by a live terminal on the
+  target machine causes the command to fail.
 - New spaces and tabs are shown at once. `focus: false` on `space.new` or
   `tab.new` keeps the shown space and the target space's selected tab (with no
   space shown, the new space is shown), for work the person looks at later;

@@ -463,13 +463,16 @@ impl Core {
 
     /// Starts a program in a new core terminal and returns its address (`tN`).
     /// Starts a terminal, here or on another machine (`on`: its name in `hc machine ls`).
-    pub fn run(&self, argv: Vec<String>, cwd: Option<String>, labels: Value, on: Option<&str>, size: Option<(u16, u16)>, display: Value) -> Result<String> {
+    pub fn run(&self, argv: Vec<String>, name: Option<&str>, cwd: Option<String>, labels: Value, on: Option<&str>, size: Option<(u16, u16)>, display: Value) -> Result<String> {
         let mut env = json!({"TERM": "xterm-256color", "COLORTERM": "truecolor", "TERM_PROGRAM": "herdr"});
         // A split's launch token, for its wrapper (`remote_shell::cannot_start`).
         if let Some(token) = labels.get("herdr.launch") {
             env["HERDR_LAUNCH"] = token.clone();
         }
         let mut params = json!({"argv": argv, "cwd": cwd, "env": env, "labels": labels, "on": on, "keep": true, "display": display});
+        if let Some(name) = name {
+            params["name"] = json!(name);
+        }
         // Released cores ignore unknown parameters, including when forwarding to another machine.
         if let Some((cols, rows)) = size {
             params["size"] = json!({"cols": cols, "rows": rows});
@@ -585,7 +588,7 @@ pub fn offline() -> Arc<Core> {
 }
 
 /// A core that answers every call at once: `terminal.run` with a new address,
-/// whose argv it passes on to `runs`; anything else with `{}`.
+/// whose parameters it passes on to `runs`; anything else with `{}`.
 #[cfg(test)]
 pub fn answering() -> (Arc<Core>, mpsc::Receiver<Value>) {
     let (writer, frames) = mpsc::channel::<Vec<u8>>();
@@ -598,7 +601,7 @@ pub fn answering() -> (Arc<Core>, mpsc::Receiver<Value>) {
         for (n, frame) in frames.into_iter().enumerate() {
             let Some(Ok(req)) = frame.get(HEADER..).map(serde_json::from_slice::<Value>) else { continue };
             let result = if req["method"] == "terminal.run" {
-                let _ = runs_tx.send(req["params"]["argv"].clone());
+                let _ = runs_tx.send(req["params"].clone());
                 json!({ "address": format!("t{}", 100 + n) })
             } else {
                 json!({})
@@ -764,7 +767,7 @@ mod tests {
             routes.lock().unwrap().replies.remove(&request["id"].as_u64().unwrap()).unwrap()
                 .send(Ok(json!({"address": "t1"}))).unwrap();
         });
-        assert_eq!(core.run(vec![], None, json!({}), None, Some((80, 24)), display).unwrap(), "t1");
+        assert_eq!(core.run(vec![], None, None, json!({}), None, Some((80, 24)), display).unwrap(), "t1");
         peer.join().unwrap();
     }
 

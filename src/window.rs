@@ -2654,7 +2654,7 @@ impl AppWindow {
     /// empty `cwd`: the machine's home. With no argv, that machine's core
     /// picks its own shell. `stay`: `argv` is an agent in a shell that stays
     /// (`agent_argv`), else a program its shell becomes (`split_argv`).
-    fn spawn(&mut self, argv: Option<Vec<String>>, stay: bool, cwd: String, follow: bool, space: &str, ctx: &str, on: Option<&str>, size: Option<(u16, u16)>, window: &Window) -> Result<(String, String), String> {
+    fn spawn(&mut self, argv: Option<Vec<String>>, terminal_name: Option<&str>, stay: bool, cwd: String, follow: bool, space: &str, ctx: &str, on: Option<&str>, size: Option<(u16, u16)>, window: &Window) -> Result<(String, String), String> {
         let argv = argv.unwrap_or_default();
         self.require_document(on)?;
         let mut labels = json!({ "herdr.space": crate::mirror::local(space, on), "herdr.tab": crate::mirror::local(ctx, on), "herdr.seen": "0" });
@@ -2663,11 +2663,11 @@ impl AppWindow {
             use std::hash::{BuildHasher, Hasher};
             labels["herdr.launch"] = format!("herdr-launch-{:016x}", std::collections::hash_map::RandomState::new().build_hasher().finish()).into();
         }
-        let (addr, cwd) = run_following_folder(cwd, follow, on, |cwd| match self.core.run(argv.clone(), cwd.clone(), labels.clone(), on, size, crate::terminal::initial_display(window)) {
+        let (addr, cwd) = run_following_folder(cwd, follow, on, |cwd| match self.core.run(argv.clone(), terminal_name, cwd.clone(), labels.clone(), on, size, crate::terminal::initial_display(window)) {
             // A start on a machine without `sh` (Windows): in its PowerShell, or as given.
             Err(e) if on.is_some() && argv.first().map(String::as_str) == Some("sh") && format!("{e:#}").contains("not found") => {
                 let argv = if stay { Self::powershell_argv(&argv) } else { argv.get(4..).unwrap_or_default().to_vec() };
-                self.core.run(argv, cwd, labels.clone(), on, size, crate::terminal::initial_display(window))
+                self.core.run(argv, terminal_name, cwd, labels.clone(), on, size, crate::terminal::initial_display(window))
             }
             r => r,
         })
@@ -2721,7 +2721,7 @@ impl AppWindow {
     /// A space with its first tab and terminal, shown at once unless focus is false.
     /// `machine`: another machine (`hc machine ls`). Without `folder`, it starts in the
     /// focused pane's folder when that pane is on the same machine, else in that machine's home.
-    fn new_space(&mut self, name: &str, folder: Option<String>, ctx_name: Option<&str>, argv: Option<Vec<String>>, task: Option<&str>, machine: Option<String>, focus: bool, window: &Window) -> Result<Value, String> {
+    fn new_space(&mut self, name: &str, folder: Option<String>, ctx_name: Option<&str>, terminal_name: Option<&str>, argv: Option<Vec<String>>, task: Option<&str>, machine: Option<String>, focus: bool, window: &Window) -> Result<Value, String> {
         let follow = folder.is_none();
         let on = machine.as_deref();
         // The focused pane's folder only means something on its own machine.
@@ -2731,7 +2731,7 @@ impl AppWindow {
         let folder = folder.or_else(here).unwrap_or_else(|| if on.is_some() { String::new() } else { home() });
         let (space, ctx, pane) = (self.model.fresh_id_on("sp", on), self.model.fresh_id_on("tb", on), self.model.fresh_id_on("p", on));
         let size = self.initial_size(&Tab::new(&ctx, "", &pane, "").root, &pane, window);
-        let (addr, folder) = self.spawn(Self::agent_argv(argv.clone(), task, on).or(argv), true, folder, follow, &space, &ctx, on, size, window)?;
+        let (addr, folder) = self.spawn(Self::agent_argv(argv.clone(), task, on).or(argv), terminal_name, true, folder, follow, &space, &ctx, on, size, window)?;
         let ctx_name = ctx_name.map(str::trim).unwrap_or_default();
         let tab = Tab::new(&ctx, ctx_name, &pane, &addr);
         if focus { self.model.add_space(&space, name.trim(), &folder, tab) } else { self.model.add_space_unshown(&space, name.trim(), &folder, tab) }
@@ -2742,7 +2742,7 @@ impl AppWindow {
     }
 
     /// A tab in a space (default: the shown one), shown at once unless focus is false.
-    fn new_tab(&mut self, space: Option<String>, name: &str, folder: Option<String>, argv: Option<Vec<String>>, task: Option<&str>, focus: bool, window: &Window) -> Result<Value, String> {
+    fn new_tab(&mut self, space: Option<String>, name: &str, folder: Option<String>, terminal_name: Option<&str>, argv: Option<Vec<String>>, task: Option<&str>, focus: bool, window: &Window) -> Result<Value, String> {
         let space = space.or_else(|| self.model.active_space().map(|p| p.id.clone())).ok_or("no space yet: make one first (space.new)")?;
         if self.model.space(&space).is_none() {
             return Err(format!("no space {space:?}"));
@@ -2752,7 +2752,7 @@ impl AppWindow {
         let on = self.machine_of(&space);
         let (ctx, pane) = (self.model.fresh_id_on("tb", on.as_deref()), self.model.fresh_id_on("p", on.as_deref()));
         let size = self.initial_size(&Tab::new(&ctx, "", &pane, "").root, &pane, window);
-        let (addr, _) = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv), true, folder, follow, &space, &ctx, on.as_deref(), size, window)?;
+        let (addr, _) = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv), terminal_name, true, folder, follow, &space, &ctx, on.as_deref(), size, window)?;
         self.add_new_tab(&space, Tab::new(&ctx, name.trim(), &pane, &addr), focus);
         Ok(json!({ "space": space, "tab": ctx, "terminal": addr }))
     }
@@ -2798,7 +2798,7 @@ impl AppWindow {
         let size = self.model.active_tab().filter(|tab| tab.id == ctx)
             .and_then(|_| self.initial_size(&root, &new, window));
         let argv = argv.filter(|a| !a.is_empty()).map(|a| Self::split_argv(a, on.as_deref()));
-        let (addr, _) = self.spawn(argv, false, cwd, follow, &space, &ctx, on.as_deref(), size, window)?;
+        let (addr, _) = self.spawn(argv, None, false, cwd, follow, &space, &ctx, on.as_deref(), size, window)?;
         self.model.split(&target, axis, &new, &addr);
         Ok(json!({ "pane": new, "terminal": addr }))
     }
@@ -3204,7 +3204,7 @@ impl AppWindow {
             "space.new" => {
                 let Some(focus) = Self::focus(a) else { return self.fail("space.new focus is true or false") };
                 let name = Self::arg(a, "name").unwrap_or_default();
-                let r = self.new_space(name, Self::owned(a, "folder"), Self::arg(a, "tab"), Self::argv(a), Self::arg(a, "task"), Self::owned(a, "machine").filter(|m| !m.is_empty()), focus, window);
+                let r = self.new_space(name, Self::owned(a, "folder"), Self::arg(a, "tab"), Self::arg(a, "terminal_name"), Self::argv(a), Self::arg(a, "task"), Self::owned(a, "machine").filter(|m| !m.is_empty()), focus, window);
                 self.answer(r);
             }
             "space.close" => {
@@ -3253,13 +3253,14 @@ impl AppWindow {
             "tab.new" => {
                 let Some(focus) = Self::focus(a) else { return self.fail("tab.new focus is true or false") };
                 let name = Self::arg(a, "name").unwrap_or_default();
+                let terminal_name = Self::arg(a, "terminal_name");
                 let r = match Self::owned(a, "mod") {
                     Some(m) => self.new_mod_tab(Self::owned(a, "space"), name, m, a.get("props").cloned().unwrap_or(Value::Null), focus),
                     // A person's new tab with no space open starts one, as space.new does.
                     None if person && a.get("space").is_none() && self.model.active_space().is_none() => {
-                        self.new_space("", Self::owned(a, "folder"), Some(name), Self::argv(a), Self::arg(a, "task"), None, focus, window)
+                        self.new_space("", Self::owned(a, "folder"), Some(name), terminal_name, Self::argv(a), Self::arg(a, "task"), None, focus, window)
                     }
-                    None => self.new_tab(Self::owned(a, "space"), name, Self::owned(a, "folder"), Self::argv(a), Self::arg(a, "task"), focus, window),
+                    None => self.new_tab(Self::owned(a, "space"), name, Self::owned(a, "folder"), terminal_name, Self::argv(a), Self::arg(a, "task"), focus, window),
                 };
                 self.answer(r);
             }
@@ -3429,7 +3430,7 @@ impl AppWindow {
                         let name = Self::owned(a, "name")
                             .or_else(|| argv.as_ref().and_then(|v| v.first()).map(|p| p.rsplit('/').next().unwrap_or(p).to_owned()))
                             .unwrap_or_else(|| "shell".into());
-                        self.new_tab(None, &name, Self::owned(a, "folder"), argv, None, true, window)
+                        self.new_tab(None, &name, Self::owned(a, "folder"), None, argv, None, true, window)
                     }
                 };
                 self.answer(r);
@@ -7259,6 +7260,33 @@ mod tests {
         in_own_process("split_in_shell");
     }
 
+    #[test]
+    fn new_terminal_names_reach_the_core() {
+        in_own_process("new_terminal_names");
+    }
+
+    #[gpui::test]
+    fn new_terminal_names(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("new_terminal_names") {
+            return;
+        }
+        let (core, runs) = crate::hc::answering();
+        let (view, cx) = open_window_on(cx, core, "board", "", json!({
+            "id": "main", "type": "block", "content": { "tab": "active" }
+        }));
+        let (space, tab) = cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.documents.entry(String::new()).or_default().available = true;
+            let space = this.run_as("space.new", json!({ "name": "work", "tab": "chief", "terminal_name": "first-chief" }), false, window, cx);
+            let tab = this.run_as("tab.new", json!({ "space": space["space"], "name": "chief", "terminal_name": "second-chief" }), false, window, cx);
+            (space, tab)
+        }));
+        assert!(space["terminal"].is_string(), "{space}");
+        assert!(tab["terminal"].is_string(), "{tab}");
+        let names: Vec<_> = runs.try_iter().map(|params| params["name"].clone()).collect();
+        assert_eq!(names, [json!("first-chief"), json!("second-chief")]);
+    }
+
     /// `terminal.open --argv` runs the program in your shell whatever the place, so
     /// it reads your rc files (and so your PATH). A split's shell becomes the program.
     #[gpui::test]
@@ -7283,7 +7311,8 @@ mod tests {
                 this.run_as("terminal.open", json!({ "argv": ["node", "tool.js"], "place": place }), false, window, cx)
             }));
             assert!(r.get("terminal").is_some(), "{place}: {r}");
-            started.push(runs.try_iter().last().unwrap_or_else(|| panic!("{place}: no terminal.run")));
+            let params = runs.try_iter().last().unwrap_or_else(|| panic!("{place}: no terminal.run"));
+            started.push(params["argv"].clone());
         }
         let cmd = vec!["node".to_owned(), "tool.js".to_owned()];
         let split = json!(if cfg!(windows) { cmd } else { super::unix_agent_argv(super::shell(), cmd, cfg!(target_os = "macos"), false) });

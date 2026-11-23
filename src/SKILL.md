@@ -40,9 +40,14 @@ Pick an explicit, useful name for every new space and tab; don't rely on
 default names. Use IDs from `ls` rather than guessing or acting on the wrong
 focused pane.
 
+Use `--terminal_name` with `space.new` or `tab.new` to address the new terminal
+by name in `hc`. Use 1–32 characters from `a-z`, `0-9`, `-`, `_` and `.`, starting
+with a letter or digit. Avoid names shaped like terminal IDs such as `t7`. The
+command fails if a live terminal on that machine already holds the name.
+
 ```sh
 herdr-app do space.new --name api --folder /path/to/api
-herdr-app do tab.new --name "fix login" --argv '["claude"]' --task "Look at the login bug"
+herdr-app do tab.new --name "fix login" --terminal_name fix-login --argv '["claude"]' --task "Look at the login bug"
 herdr-app do pane.split --direction right --pane p12
 herdr-app do agent.focus --terminal t7
 ```

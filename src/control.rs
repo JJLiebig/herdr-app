@@ -137,7 +137,12 @@ fn parse_args(rest: &[String]) -> Result<Value, String> {
             while let Some(flag) = it.next() {
                 let key = flag.strip_prefix("--").ok_or_else(|| format!("expected --<arg>, got {flag:?}"))?;
                 let value = it.next().ok_or_else(|| format!("--{key} needs a value"))?;
-                let v = serde_json::from_str::<Value>(value).ok().filter(|v| !v.is_string()).unwrap_or_else(|| Value::String(value.clone()));
+                // Spellings like `123` and `true` are valid terminal names.
+                let v = if key == "terminal_name" {
+                    Value::String(value.clone())
+                } else {
+                    serde_json::from_str::<Value>(value).ok().filter(|v| !v.is_string()).unwrap_or_else(|| Value::String(value.clone()))
+                };
                 out.insert(key.to_owned(), v);
             }
             Ok(Value::Object(out))
