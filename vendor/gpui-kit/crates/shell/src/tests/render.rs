@@ -3966,6 +3966,100 @@ fn nested_view_build_error(cx: &mut TestAppContext, name: &str, source: &str) ->
     })
 }
 
+#[gpui::test]
+fn a_failed_render_blocks_covered_pointer_input_and_copies_details(cx: &mut TestAppContext) {
+    cx.update(crate::init);
+    let inputs = Rc::new(RefCell::new(Vec::new()));
+    crate::export_module(HostModule::new("pointer-probe").function("record", {
+        let inputs = inputs.clone();
+        move |args| {
+            inputs.borrow_mut().push(args.string(0)?.to_owned());
+            Ok(HostValue::Null)
+        }
+    }))
+    .expect("register pointer probe");
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    let source = r#"
+import { div, View } from "gpui-kit";
+import { v_flex } from "gpui-base";
+import { record } from "pointer-probe";
+
+export default class PointerProbe extends View {
+  render() {
+    if (this.fail) throw new Error("render failed on purpose");
+    return v_flex().size_full()
+      .child(div().id("covered").w_full().h(80)
+        .on_click(() => record("click"))
+        .on_hover(hovered => { if (hovered) record("hover"); })
+        .on_scroll_wheel(() => record("scroll")))
+      .child(div().id("toggle").w_full().h(80).on_click((_, cx) => {
+        record("toggle");
+        this.fail = true;
+        cx.notify();
+      }));
+  }
+}
+"#;
+    let view_type = runtime
+        .load_source("banner-pointer-probe.js", source)
+        .expect("load");
+    let (root, context) = cx.add_window_view(move |window, cx| {
+        RootedScriptView(
+            runtime
+                .instantiate_view(&view_type, window, cx)
+                .expect("instantiate"),
+        )
+    });
+    context.simulate_resize(gpui::size(px(900.), px(300.)));
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    let view = root.read_with(context, |root, _| root.0.clone());
+    let covered = point(px(20.), px(24.));
+    let toggle = point(px(20.), px(120.));
+    let scroll = |context: &mut VisualTestContext| {
+        context.simulate_event(gpui::ScrollWheelEvent {
+            position: covered,
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-40.))),
+            ..Default::default()
+        });
+    };
+
+    context.simulate_mouse_move(covered, None, Modifiers::default());
+    context.simulate_click(covered, Modifiers::default());
+    scroll(context);
+    context.simulate_mouse_move(toggle, None, Modifiers::default());
+    context.simulate_click(toggle, Modifiers::default());
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(view.read_with(context, |view, _| view.build_error().is_some()));
+    assert_eq!(inputs.take(), ["hover", "click", "scroll", "toggle"]);
+
+    context.simulate_mouse_move(covered, None, Modifiers::default());
+    context.simulate_click(covered, Modifiers::default());
+    scroll(context);
+    let copy = context.update(|window, _| {
+        gpui_base::test_support::find(window, &[], &"shell-failure-copy".into())
+            .expect("copy button")
+            .bounds()
+            .center()
+    });
+    context.simulate_mouse_move(copy, None, Modifiers::default());
+    context.simulate_click(copy, Modifiers::default());
+    let covered_inputs = inputs.take();
+    assert!(
+        covered_inputs.is_empty(),
+        "covered input leaked: {covered_inputs:?}"
+    );
+    context.update(|_, cx| {
+        let details = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .expect("Copy details should write to the clipboard");
+        assert!(details.contains("render failed on purpose"), "{details}");
+    });
+
+    context.simulate_click(toggle, Modifiers::default());
+    assert_eq!(inputs.take(), ["toggle"]);
+}
+
 struct Empty;
 
 /// Test-only window root that lets an already-created script-view entity take
